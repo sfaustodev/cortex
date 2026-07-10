@@ -24,6 +24,6 @@
 - [x] LICENSE (MIT) · .gitignore · CLAUDE.md · CI (matrix 3.9–3.13, ubuntu+macos)
 - [x] Ajuste de caminhos em docs/DEMO.md (2 linhas)
 - [x] Scaffold discipline (este arquivo + DIARY + HUMAN)
-- [ ] Revisão do Fausto (README + HUMAN.md Q-01..Q-06)
-- [ ] `gh repo create sfaustodev/cortex --public` + push (só com o "publica")
-- [ ] Tag `v1.0.0` + verificação do badge de CI
+- [x] Revisão do Fausto — "pronto aprovado" (2026-07-10)
+- [x] `gh repo create sfaustodev/cortex --public` + push — publicado em 2026-07-10
+- [x] Tag `v1.0.0` + push — CI matrix disparado no push (badge acende ao concluir)

@@ -1,5 +1,19 @@
 # DIARY — cortex-oss
 
+## 2026-07-10 — publicação
+**Tickets touched:** —
+**Done:**
+- "Pronto aprovado" recebido do Fausto — aprovação em bloco do repo como montado.
+- `gh repo create sfaustodev/cortex --public --source . --push` executado: https://github.com/sfaustodev/cortex no ar, branch main, visibilidade PUBLIC.
+- Topics adicionados: mcp, mcp-server, claude-code, memory, ai-agents, sqlite, python.
+- HUMAN.md: Q-01..Q-06 resolvidas em bloco (aprovação cobre os defaults assumidos).
+- Tag `v1.0.0` anotada e enviada; CI matrix (3.9–3.13 × ubuntu/macos) disparado pelo push.
+**In flight:**
+- Badge de CI: aguarda conclusão da primeira run.
+**Blocked:** —
+**Files changed:** SPRINT.md, DIARY.md, HUMAN.md (registro pós-publicação).
+**Next session should start with:** conferir badge verde; se Fausto topar, mover material P2P da arena para o repo p2p-desk; próximo do catálogo: revisão de instalação do Mycorrhiza-MCP.
+
 ## 2026-07-09 — nascimento do repo público
 **Tickets touched:** —
 **Done:**
