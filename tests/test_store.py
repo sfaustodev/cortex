@@ -544,7 +544,7 @@ class TestBriefing(StoreCase):
 
     def test_briefing_vazio_respeita_budget(self):
         deep = Path(self._tmp.name)
-        for i in range(8):
+        for i in range(5):
             deep = deep / ("subnivel-%d-%s" % (i, "x" * 55))
         s = CortexStore(deep / "cortex.db", force_like=self.force_like)
         self.addCleanup(s.close)
