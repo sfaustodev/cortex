@@ -1,5 +1,16 @@
 # DIARY — cortex-oss
 
+## 2026-07-11 — CI red: triagem (Case A) e fix
+**Done:**
+- Primeira run do CI: vermelha nas 10 pernas. Protocolo ci-red-triage acionado → Case A (commit ee3b1a8, autoria desta sessão).
+- Causa-raiz: teste de budget constrói caminho de ~562 chars; SQLite de fábrica impõe MAX_PATHNAME=512 — o SQLite da Apple (3.51.0, máquina local) tolera, por isso nunca acusou na arena.
+- Reprodução E validação do fix em Linux com SQLite stock (container) ANTES de propor; fix aprovado pelo Fausto ("tem minha benção").
+- Fix cirúrgico 72763c3: range(8)→range(5) apenas na linha 547 — os outros dois range(8) do arquivo criam ENTRADAS (semântica diferente) e ficaram intocados.
+- **CI verde: 10/10 pernas em 36s. Badge aceso.**
+**Lesson:**
+- sed global quase alterou 2 testes saudáveis — para edição pontual em arquivo de teste com padrões repetidos: âncora única + assert count==1, sempre.
+**Next session should start with:** publicar os carinhos da Mycorrhiza (commit local 2c3d7a1 aguarda OK do Fausto).
+
 ## 2026-07-10 — publicação
 **Tickets touched:** —
 **Done:**

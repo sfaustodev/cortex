@@ -27,3 +27,4 @@
 - [x] Revisão do Fausto — "pronto aprovado" (2026-07-10)
 - [x] `gh repo create sfaustodev/cortex --public` + push — publicado em 2026-07-10
 - [x] Tag `v1.0.0` + push — CI matrix disparado no push (badge acende ao concluir)
+- [x] CI red triage (Case A) → fix cirúrgico 72763c3 → matriz 10/10 verde, badge aceso
