@@ -60,11 +60,15 @@ class Pyproject(unittest.TestCase):
         self.assertIsNotNone(deps, "dependencies precisa ser declarado")
         self.assertEqual(deps.group(1).strip(), "")
 
-    def test_ships_both_modules_as_top_level(self):
+    def test_wheel_ships_both_modules(self):
         """cortex_server importa cortex_store pelo nome — se o wheel levar só
         um dos dois, o console script quebra no import."""
-        for module in ("cortex_server", "cortex_store"):
-            self.assertIn('"%s"' % module, self.text)
+        include = re.search(
+            r"^\[tool\.hatch\.build\.targets\.wheel\]\s*\ninclude\s*=\s*\[(.*?)\]",
+            self.text, flags=re.M | re.S)
+        self.assertIsNotNone(include, "o alvo wheel precisa declarar include")
+        shipped = set(re.findall(r'"([^"]+)"', include.group(1)))
+        self.assertEqual(shipped, {"cortex_server.py", "cortex_store.py"})
 
     def test_exposes_a_console_script_entry_point(self):
         entry = toml_value(self.text, PYPI_NAME, "project.scripts")

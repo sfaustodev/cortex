@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sfaustodev/cortex",
+  "title": "cortex",
+  "description": "Durable per-task working memory for coding agents: briefing, remember, recall.",
+  "version": "1.0.0",
+  "websiteUrl": "https://github.com/sfaustodev/cortex",
+  "repository": {
+    "url": "https://github.com/sfaustodev/cortex",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "cortex-mcp-server",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "CORTEX_DIR",
+          "description": "Task directory whose memory to open. Defaults to the working directory the server is launched in; set it when the host launches servers from an unpredictable cwd.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
