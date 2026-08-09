@@ -1,0 +1,25 @@
+{
+  "name": "cortex",
+  "owner": {
+    "name": "sfaustodev",
+    "url": "https://github.com/sfaustodev"
+  },
+  "description": "Durable working memory for coding agents.",
+  "plugins": [
+    {
+      "name": "cortex",
+      "source": "./",
+      "description": "Durable per-task working memory over MCP: briefing, remember, recall. Pure Python stdlib, zero dependencies, local only.",
+      "version": "1.0.0",
+      "author": {
+        "name": "sfaustodev",
+        "url": "https://github.com/sfaustodev"
+      },
+      "homepage": "https://github.com/sfaustodev/cortex",
+      "repository": "https://github.com/sfaustodev/cortex",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": ["memory", "mcp", "context", "durable-memory"]
+    }
+  ]
+}
