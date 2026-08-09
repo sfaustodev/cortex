@@ -1,0 +1,61 @@
+name: publish
+
+# PyPI primeiro, registry depois: o registry valida a posse buscando o
+# pacote no PyPI e procurando "mcp-name:" no README. Inverter a ordem dá 404.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Suite completa (inclui a trava de versão entre os 4 manifestos)
+        run: python -m unittest discover -s tests
+      - name: A tag precisa bater com a versão declarada
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os, re, sys
+          ref = os.environ.get("REF_NAME", "")
+          declared = json.load(open("server.json"))["version"]
+          if ref.startswith("v") and ref[1:] != declared:
+              sys.exit("tag %s != versao declarada %s" % (ref, declared))
+          print("ok: %s" % declared)
+          PY
+
+  pypi:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - name: Publicar no PyPI (trusted publishing, sem token)
+        run: uv publish --trusted-publishing always
+
+  registry:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar o mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          chmod +x mcp-publisher
+      - name: Publicar o verbete (OIDC — namespace io.github.sfaustodev/*)
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

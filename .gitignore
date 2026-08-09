@@ -2,3 +2,8 @@
 __pycache__/
 *.py[co]
 .DS_Store
+
+# artefatos de build (uv build / hatchling)
+dist/
+build/
+*.egg-info/
