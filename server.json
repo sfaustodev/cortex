@@ -3,7 +3,7 @@
   "name": "io.github.sfaustodev/cortex",
   "title": "cortex",
   "description": "Durable per-task working memory for coding agents: briefing, remember, recall.",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "websiteUrl": "https://github.com/sfaustodev/cortex",
   "repository": {
     "url": "https://github.com/sfaustodev/cortex",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "cortex-mcp-server",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "transport": {
         "type": "stdio"
       },

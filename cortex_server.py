@@ -17,7 +17,7 @@ import cortex_project  # noqa: E402
 from cortex_store import CortexStore, StoreError, VALID_TYPES  # noqa: E402
 
 SERVER_NAME = "cortex"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.0.1"
 SUPPORTED_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 LATEST_VERSION = SUPPORTED_VERSIONS[-1]
 NUDGE_THRESHOLD = 8
