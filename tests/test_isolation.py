@@ -301,5 +301,59 @@ class ExistingMemoriesKeepWorking(IsolationCase):
                         "a partir daqui passa a ser carimbada")
 
 
+class WorktreeMemoryBelongsToTheRepo(IsolationCase):
+    """Numa worktree vinculada, `.git` é um ARQUIVO apontando para o repo
+    principal. Tratá-lo como raiz faz a memória nascer dentro de um
+    diretório efêmero — e o Claude Code remove worktrees rotineiramente,
+    levando junto tudo que a tarefa aprendeu."""
+
+    def _repo_with_worktree(self):
+        repo = self.project("iso-wt-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "a.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "tarefa1"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "tarefa1")
+        return repo, wt
+
+    def test_memory_written_in_a_worktree_lands_in_the_main_repo(self):
+        repo, wt = self._repo_with_worktree()
+        text, err = self.server(wt).call(
+            "cortex_remember",
+            {"type": "decision", "text": "decisao-tomada-na-worktree"})
+        self.assertFalse(err, text)
+        self.assertTrue((repo / ".cortex").exists(),
+                        "memória tem que morar no repo principal")
+        self.assertFalse((wt / ".cortex").exists(),
+                         "nada pode nascer dentro da worktree efêmera")
+
+    def test_memory_survives_removing_the_worktree(self):
+        repo, wt = self._repo_with_worktree()
+        self.server(wt).call(
+            "cortex_remember",
+            {"type": "decision", "text": "decisao-que-nao-pode-morrer"})
+        for s in list(self._servers):
+            s.kill()
+        subprocess.run(("git", "worktree", "remove", "--force", str(wt)),
+                       cwd=str(repo), check=True, capture_output=True)
+
+        text, _ = self.server(repo).call("cortex_briefing", {})
+        self.assertIn("decisao-que-nao-pode-morrer", text,
+                      "a memória morreu junto com a worktree")
+
+    def test_worktree_and_main_repo_share_one_memory(self):
+        repo, wt = self._repo_with_worktree()
+        self.server(repo).call("cortex_remember",
+                               {"type": "fact", "text": "gravado-na-main"})
+        text, _ = self.server(wt).call("cortex_briefing", {})
+        self.assertIn("gravado-na-main", text,
+                      "a worktree tem que enxergar a memória do repo")
+
+
 if __name__ == "__main__":
     unittest.main()

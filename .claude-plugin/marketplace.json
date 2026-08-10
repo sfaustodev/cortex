@@ -10,7 +10,7 @@
       "name": "cortex",
       "source": "./",
       "description": "Durable per-task working memory over MCP: briefing, remember, recall. Pure Python stdlib, zero dependencies, local only.",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "author": {
         "name": "sfaustodev",
         "url": "https://github.com/sfaustodev"

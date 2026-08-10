@@ -372,6 +372,15 @@ ancestral que contenha `.cortex/` ou `.git/`, **parando antes de
 `CORTEX_DIR` continua sendo o escape explícito do humano e não passa
 pela guarda — é o próprio remédio que a mensagem de erro ensina.
 
+Uma worktree do git é um caso à parte: seu `.git` é um *arquivo* que
+aponta para o repositório principal. Tratá-la como raiz faz a memória
+nascer numa cópia de trabalho **descartável** — ferramenta de agente cria
+e remove worktree o tempo todo — e a tarefa perde exatamente o que
+deveria ter preservado. Então a worktree resolve para o repositório dono,
+lendo o `gitdir:` do arquivo. Custo aceito: duas worktrees em paralelo
+compartilham a memória do repo. As entradas já carregam sessão, então a
+mistura é legível; perder tudo não é.
+
 **Trade-off assumido:** a guarda é breaking. Quem hoje roda com cwd em
 `$HOME` e uma memória global "funcionando" passa a receber erro. É
 deliberado: essa configuração já era descrita como errada, e servir ali

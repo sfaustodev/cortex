@@ -29,6 +29,33 @@ def _canon(path):
         return Path(path)
 
 
+def _main_worktree_root(git_path):
+    """Numa worktree vinculada, `.git` é um ARQUIVO com `gitdir: <main>/.git/
+    worktrees/<nome>`. Devolve a raiz do repositório PRINCIPAL, ou None se
+    isto for um `.git` comum.
+
+    Existe porque worktree é descartável — o Claude Code cria e remove as
+    dele o tempo todo — e uma memória que mora lá dentro morre junto com a
+    tarefa que ela deveria preservar.
+    """
+    try:
+        if not git_path.is_file():
+            return None
+        content = git_path.read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not content.startswith("gitdir:"):
+        return None
+    gitdir = Path(content.split(":", 1)[1].strip())
+    if not gitdir.is_absolute():
+        gitdir = (git_path.parent / gitdir).resolve()
+    # .../<main>/.git/worktrees/<nome>  →  <main>
+    for parent in gitdir.parents:
+        if parent.name == ".git":
+            return _canon(parent.parent)
+    return None
+
+
 def _home():
     try:
         raw = Path.home()
@@ -66,8 +93,14 @@ def resolve(env=None, cwd=None):
     while True:
         if home is not None and current == home:
             break
-        if (current / MEMORY_DIRNAME).exists() or (current / ".git").exists():
+        if (current / MEMORY_DIRNAME).exists():
             root = current
+            break
+        git_path = current / ".git"
+        if git_path.exists():
+            # Worktree vinculada: a memória pertence ao repositório, não à
+            # cópia de trabalho descartável.
+            root = _main_worktree_root(git_path) or current
             break
         if current.parent == current:
             break
