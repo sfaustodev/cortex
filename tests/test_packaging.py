@@ -154,13 +154,25 @@ class ReadmeClaimsMatchReality(unittest.TestCase):
     def setUp(self):
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    def test_line_count_claim_matches_the_two_files(self):
+    def test_line_count_claim_matches_the_shipped_modules(self):
+        """Lê o número que o README afirma e confere contra a contagem real —
+        assim a trava sobrevive a um módulo novo em vez de fossilizar."""
+        shipped = sorted(p.name for p in ROOT.glob("cortex_*.py"))
         total = sum(len((ROOT / f).read_text(encoding="utf-8").splitlines())
-                    for f in ("cortex_server.py", "cortex_store.py"))
-        self.assertLess(abs(total - 900), 100,
-                        "o README diz ~900 linhas; hoje são %d" % total)
-        self.assertNotIn("~1,000 lines", self.readme)
-        self.assertNotIn("~1.000 linhas", self.readme)
+                    for f in shipped)
+        claimed = re.search(r"~([\d,.]+) lines", self.readme)
+        self.assertIsNotNone(claimed, "o README precisa afirmar a contagem")
+        number = int(claimed.group(1).replace(",", "").replace(".", ""))
+        self.assertLess(
+            abs(total - number), number * 0.15,
+            "o README diz ~%d linhas; %s somam %d" % (number, shipped, total))
+
+    def test_file_count_claim_matches_reality(self):
+        shipped = sorted(p.name for p in ROOT.glob("cortex_*.py"))
+        words = {2: "two files", 3: "three files", 4: "four files"}
+        self.assertIn(words[len(shipped)], self.readme,
+                      "o README precisa dizer %s (%s)"
+                      % (words[len(shipped)], shipped))
 
     def test_the_suggested_grep_really_returns_nothing(self):
         """O README mandava procurar 'strings de versão de protocolo' que não

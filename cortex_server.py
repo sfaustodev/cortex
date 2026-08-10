@@ -13,10 +13,11 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cortex_project  # noqa: E402
 from cortex_store import CortexStore, StoreError, VALID_TYPES  # noqa: E402
 
 SERVER_NAME = "cortex"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "2.0.0"
 SUPPORTED_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 LATEST_VERSION = SUPPORTED_VERSIONS[-1]
 NUDGE_THRESHOLD = 8
@@ -151,9 +152,15 @@ def _short(text, n):
     return text if len(text) <= n else text[: n] + "…"
 
 
-def _resolve_base():
-    base = os.environ.get("CORTEX_DIR") or os.getcwd()
-    return Path(base).expanduser().resolve()
+NO_PROJECT_MSG = (
+    "córtex sem projeto: o diretório resolvido é %s, que serviria uma memória"
+    " global compartilhada por todas as tarefas. Lance o servidor na raiz do"
+    " projeto ou defina CORTEX_DIR apontando para ela.")
+
+MISMATCH_MSG = (
+    "esta memória pertence a %s — somente-leitura aqui. Se ela é legitimamente"
+    " deste projeto (pasta movida ou renomeada), adote uma vez com"
+    " CORTEX_ADOPT=%s.")
 
 
 def _error(rid, code, message):
@@ -167,8 +174,10 @@ class CortexServer:
         self.store_error = None
         self.calls_since_remember = 0
         self._base = None
+        self._memory_dir = None
+        self._no_project = None
         try:
-            self._base = _resolve_base()
+            mode, root, memory_dir = cortex_project.resolve()
         except Exception as exc:  # noqa: BLE001  (ex.: cwd deletado)
             self.store_error = (
                 "córtex indisponível: não consegui resolver o diretório-base"
@@ -176,14 +185,20 @@ class CortexServer:
                 % exc)
             _log(self.store_error)
             return
+        if mode == cortex_project.NO_PROJECT:
+            # Fail-closed: servir aqui contradiria a única promessa que o
+            # córtex faz — uma memória por tarefa.
+            self._no_project = NO_PROJECT_MSG % root
+            _log(self._no_project)
+            return
+        self._base = root
+        self._memory_dir = memory_dir
         try:
-            home = Path.home().resolve()
-        except Exception:  # noqa: BLE001
-            home = None
-        if str(self._base) == "/" or self._base == home:
-            _log("aviso: diretório-base é %s — a memória ficaria global "
-                 "demais; registre o servidor no escopo do projeto ou "
-                 "configure CORTEX_DIR (ver INSTALL.md)" % self._base)
+            cortex_project.ensure_born(memory_dir, root)
+        except Exception as exc:  # noqa: BLE001  (ex.: caminho ocupado por arquivo)
+            # Não é sentença de morte: _ensure_store produz o erro acionável
+            # e o protocolo segue de pé para poder respondê-lo.
+            _log("não consegui carimbar %s (%s)" % (memory_dir, exc))
         self._ensure_store()
 
     def _ensure_store(self):
@@ -195,7 +210,7 @@ class CortexServer:
         if self._base is None:
             return False
         try:
-            self.store = CortexStore(self._base / ".cortex" / "cortex.db")
+            self.store = CortexStore(self._memory_dir / "cortex.db")
             self.store_error = None
             _log("base aberta em %s (busca: %s, sessão %s)"
                  % (self.store.db_path,
@@ -258,11 +273,23 @@ class CortexServer:
                           "Invalid params: arguments deve ser um objeto")
         if name not in TOOL_NAMES:
             return _error(rid, -32602, "Unknown tool: %s" % name)
+        if self._no_project is not None:
+            return self._tool_text(rid, self._no_project, is_error=True)
         self.calls_since_remember += 1
         if not self._ensure_store():
             return self._tool_text(rid, self.store_error, is_error=True)
+        # Dono re-verificado a cada chamada, não só no boot: a pasta pode ser
+        # trocada por baixo de um processo vivo.
+        owner_status, owner = cortex_project.check_owner(self._memory_dir,
+                                                         self._base)
+        read_only = owner_status == cortex_project.MISMATCH
         try:
             if name == "cortex_remember":
+                if read_only:
+                    return self._tool_text(
+                        rid, "Gravação recusada: " + MISMATCH_MSG % (owner,
+                                                                     owner),
+                        is_error=True)
                 result = self.store.remember(
                     args.get("type"), args.get("text"),
                     tags=args.get("tags"),
@@ -280,6 +307,8 @@ class CortexServer:
                 text = self.store.briefing(
                     budget_chars=args.get("budget_chars", 6000))
                 text += self._nudge()
+            if read_only:
+                text = "⚠ " + MISMATCH_MSG % (owner, owner) + "\n\n" + text
             return self._tool_text(rid, text, is_error=False)
         except StoreError as exc:
             return self._tool_text(rid, "Erro: %s" % exc, is_error=True)
