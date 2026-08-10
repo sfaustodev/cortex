@@ -235,6 +235,13 @@ não-gravável) responde as tools com `isError` explicativo em vez de
 morrer mudo. O briefing SEMPRE mostra o caminho do db na primeira linha
 — humano e agente detectam "estou lendo a memória errada" em um relance.
 
+> **Revisto por D13-D15 (v2.0.0).** O aviso em stderr provou-se
+> insuficiente: ninguém o lê, e enquanto isso o servidor serve uma
+> memória global — o que torna FALSA a promessa de que nada vaza para o
+> briefing de outro projeto. `/` e `$HOME` passam a ser fail-closed. A
+> resolução também deixa de ser o cwd cru (D13) e a memória passa a ser
+> carimbada (D14).
+
 **Trade-off assumido:** o escopo real é "um diretório/worktree", que é
 um *proxy* de "uma tarefa" — o padrão de trabalho que o enunciado
 descreve (tarefas longas ≈ branch/worktree). Duas tarefas sequenciais no
@@ -347,6 +354,65 @@ O auto-supersede de progress evita que o ruído de checkpoints ensine o
 agente a ignorar o briefing.
 
 ---
+
+### D13 — A raiz do projeto é resolvida, não assumida
+
+O cwd cru quebra em dois casos reais. Em monorepo, abrir a sessão em
+`repo/packages/web` num dia e em `repo/` no outro criava **dois**
+cadernos para a mesma tarefa — e o briefing vazio faz o agente
+re-derivar tudo, que é exatamente a falha que o produto existe para
+impedir. E quando o host lança de `/` ou `$HOME`, o cwd aponta para um
+lugar onde a memória seria global.
+
+Resolução nova, a partir de `realpath(cwd)`: subir até o primeiro
+ancestral que contenha `.cortex/` ou `.git/`, **parando antes de
+`$HOME`**; nada encontrado, o próprio cwd. Se o resultado for `$HOME` ou
+`/`, o servidor entra em **modo sem-projeto**: toda tool responde
+`isError` com a instrução de correção, e nada é criado no disco.
+`CORTEX_DIR` continua sendo o escape explícito do humano e não passa
+pela guarda — é o próprio remédio que a mensagem de erro ensina.
+
+**Trade-off assumido:** a guarda é breaking. Quem hoje roda com cwd em
+`$HOME` e uma memória global "funcionando" passa a receber erro. É
+deliberado: essa configuração já era descrita como errada, e servir ali
+mente sobre o escopo. O conserto é uma variável de ambiente.
+
+### D14 — Carimbo de dono: a pasta copiada é somente-leitura
+
+`.cortex/` é uma pasta comum e vai junto num `cp -r` ou num template de
+projeto. Sem carimbo, a memória do projeto A passa a receber escrita do
+projeto B sem que ninguém perceba.
+
+Na criação do diretório nascem, junto, um `.gitignore` com `*` (a
+memória nunca entra no git por acidente — antes isso era instrução
+manual no README) e um `OWNER` com o caminho canônico da raiz. A cada
+chamada de tool — não só no boot, porque a pasta pode ser trocada sob um
+processo vivo — o dono é reconferido. Divergiu: **somente-leitura**.
+`briefing` e `recall` seguem funcionando, com aviso citando o dono real;
+`remember` recusa.
+
+Adoção é **vinculada ao valor**: `CORTEX_ADOPT=<caminho do dono
+divergente>`, nunca uma flag genérica. Uma variável esquecida num
+`.mcp.json` só re-adotaria daquele dono específico já morto — jamais
+destrava um mismatch novo. Toda comparação usa `realpath` nos dois lados
+(o `/tmp` → `/private/tmp` do macOS geraria falso mismatch).
+
+### D15 — Memória sem carimbo é adotada, não recusada
+
+Divergência deliberada em relação ao desenho greenfield desta trava: lá,
+memória sem dono é órfã e fica somente-leitura. Aqui **não pode ser** —
+o córtex já está publicado e em uso, e todo banco existente é anterior
+ao carimbo. Recusá-los quebraria toda instalação no upgrade.
+
+Um `.cortex/` que está na sua própria raiz resolvida não é cópia: é onde
+deveria estar. Então, na ausência de `OWNER`, ele é carimbado e segue
+gravável. A proteção do D14 passa a valer para tudo que nasce a partir
+daqui.
+
+**Custo assumido:** uma pasta copiada *antes* desta versão é
+indistinguível de uma legítima e será adotada no primeiro contato. É o
+preço de não quebrar quem já usa — e o modelo de ameaça é acidente, não
+adversário.
 
 ## 3. Modelo de dados
 
