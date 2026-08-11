@@ -74,6 +74,12 @@ def _main_worktree_root(git_path):
         return None
     if not common.is_dir():
         return None
+    # O admin dir precisa morar em `<common>/worktrees/<nome>`. Sem esta
+    # âncora, quem controla `commondir` e o backlink escolhe a vítima: aponta
+    # o common para o `.git` dela e a memória vai parar lá. É também o que
+    # separa worktree de submódulo, cujo admin fica em `modules/`.
+    if _canon(gitdir).parent != common / "worktrees":
+        return None
     if common.name == ".git":
         return _canon(common.parent)
     return _root_from_config(common)
@@ -91,12 +97,25 @@ def _root_from_config(common):
         config = (common / "config").read_text(encoding="utf-8")
     except Exception:  # noqa: BLE001
         return None
-    if re.search(r"^\s*bare\s*=\s*true\s*$", config, re.M | re.I):
+    # Só a seção [core]: uma ferramenta de terceiros que grave a própria
+    # chave `worktree` em outra seção mandaria a memória para o projeto
+    # dela. Nomes de chave no git são case-insensitive.
+    core = {}
+    secao = None
+    for linha in config.splitlines():
+        linha = linha.strip()
+        if linha.startswith("[") and linha.endswith("]"):
+            secao = linha[1:-1].strip().lower()
+            continue
+        if secao != "core" or "=" not in linha or linha.startswith(("#", ";")):
+            continue
+        chave, _, valor = linha.partition("=")
+        core[chave.strip().lower()] = valor.strip().strip('"')
+    if core.get("bare", "").lower() == "true":
         return common          # bare não tem árvore de trabalho; o dir é durável
-    found = re.search(r"^\s*worktree\s*=\s*(.+?)\s*$", config, re.M)
-    if not found:
+    if "worktree" not in core:
         return None
-    root = _canon(common / found.group(1))
+    root = _canon(common / core["worktree"])
     return root if root.is_dir() else None
 
 
@@ -200,6 +219,12 @@ def stranded_memory(cwd, project_root):
     subdiretório da worktree é o caso normal, não a exceção.
     """
     start, root = _canon(cwd), _canon(project_root)
+    # Só faz sentido varrer quando a raiz está ACIMA do cwd — o caso do
+    # desvio de worktree. Com CORTEX_DIR apontando para fora, subir até a
+    # raiz do FS acusaria a memória legítima de outro projeto de órfã, e a
+    # receita de recuperação misturaria as duas.
+    if root not in start.parents:
+        return None
     current = start
     while True:
         if current == root:
@@ -219,7 +244,12 @@ def is_install_dir(project_root):
     dentro do diretório de instalação faria a memória nascer ali — e o cache
     de plugin é recriado a cada update, então ela sumiria sem aviso.
     """
-    return _canon(project_root) == _canon(Path(__file__).resolve().parent)
+    root = _canon(project_root)
+    if root != _canon(Path(__file__).resolve().parent):
+        return False
+    # Um clone de desenvolvimento do próprio córtex tem `.git` e é durável —
+    # é projeto, não cache. O cache do plugin é uma cópia sem `.git`.
+    return not (root / ".git").exists()
 
 
 def stamp(memory_dir, project_root):

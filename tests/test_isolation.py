@@ -43,13 +43,13 @@ class Server:
     """Cliente do protocolo, com cwd e env controlados — é o cwd que define
     a tarefa, então ele é o sujeito do teste."""
 
-    def __init__(self, cwd, env_extra=None):
+    def __init__(self, cwd, env_extra=None, server=None):
         env = os.environ.copy()
         env.pop("CORTEX_DIR", None)
         env.pop("CORTEX_ADOPT", None)
         env.update(env_extra or {})
         self.proc = subprocess.Popen(
-            [sys.executable, str(SERVER)],
+            [sys.executable, str(server or SERVER)],
             cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env, text=True,
         )
@@ -533,21 +533,6 @@ class StrandedMemoryIsAnnounced(IsolationCase):
         self.assertNotIn("órf", text.lower())
 
 
-class MemoryNeverLandsWhereTheServerLives(IsolationCase):
-    """Achado do trio (codex #2/#6): sem CORTEX_DIR a raiz vem do cwd. Se um
-    host lançar o servidor de dentro do próprio diretório de instalação (o
-    cache do plugin, que é efêmero), a memória nasceria ali e sumiria no
-    próximo update — sem ninguém perceber."""
-
-    def test_briefing_refuses_and_explains_in_the_install_dir(self):
-        text, err = self.server(SERVER.parent).call("cortex_briefing", {})
-        self.assertTrue(err, "não há memória aqui e não vamos criar uma")
-        self.assertIn("instala", text.lower(),
-                      "a recusa precisa dizer que a raiz é o diretório do "
-                      "próprio servidor")
-        self.assertIn("CORTEX_DIR", text, "e ensinar a saída")
-        self.assertFalse((SERVER.parent / ".cortex").exists())
-
 
 class ConcurrentWritesFromRepoAndWorktree(IsolationCase):
     """Achado do trio (codex #5 / muse A5): depois deste PR, main e worktree
@@ -642,20 +627,6 @@ class WorktreeIsAuthenticatedByGitMetadata(IsolationCase):
                          "worktree órfã contaminou o repositório novo")
         self.assertTrue((side / ".cortex").exists())
 
-
-class EnvironmentWarningsReachEveryTool(IsolationCase):
-    """Rodada 2 (codex item 3): o aviso só ia no briefing, mas o protocolo
-    recomenda o briefing — não o impõe. Um agente que chame remember de
-    primeira não via nada."""
-
-    def test_install_dir_refuses_writes_and_creates_nothing(self):
-        srv = self.server(SERVER.parent)
-        text, err = srv.call("cortex_remember", {"type": "fact", "text": "x"})
-        self.assertTrue(err, "gravar no diretório de instalação tem que "
-                             "ser recusado: some no próximo update")
-        self.assertIn("CORTEX_DIR", text)
-        self.assertFalse((SERVER.parent / ".cortex").exists(),
-                         "nada pode nascer no diretório de instalação")
 
 
 class StrandedMemoryFoundFromSubdirectory(IsolationCase):
@@ -763,6 +734,193 @@ class WorktreeRedirectBeatsNestedResidue(IsolationCase):
         text, _ = self.server(repo).call("cortex_briefing", {})
         self.assertIn("do-fundo", text,
                       "resíduo aninhado capturou a gravação")
+
+
+class ForgedWorktreeMetadataIsRejected(IsolationCase):
+    """Rodada 3 do trio (muse F1-C1/F1-C2). A autenticação exigia `commondir`
+    e backlink, mas não que o admin dir estivesse DENTRO de
+    `<common>/worktrees/`. Quem controla os dois arquivos escolhe a vítima:
+    aponta `commondir` para o `.git` dela e a memória vai para lá."""
+
+    def test_crafted_admin_dir_cannot_claim_another_repo(self):
+        base = self.project("iso-forge-")
+        vitima = base / "vitima"
+        vitima.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(vitima), check=True,
+                           capture_output=True)
+        (vitima / "f.txt").write_text("x")
+        subprocess.run(("git", "add", "-A"), cwd=str(vitima), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(vitima),
+                       check=True, capture_output=True)
+
+        falsa = base / "falsa"
+        falsa.mkdir()
+        admin = base / "admin-forjado"
+        admin.mkdir()
+        (admin / "commondir").write_text(str(vitima / ".git"))
+        (admin / "gitdir").write_text(str(falsa / ".git"))
+        (falsa / ".git").write_text("gitdir: %s\n" % admin)
+
+        text, err = self.server(falsa).call(
+            "cortex_remember", {"type": "fact", "text": "sequestro"})
+        self.assertFalse(err, text)
+        self.assertFalse((vitima / ".cortex").exists(),
+                         "metadado forjado capturou a memória da vítima")
+
+    def test_submodule_with_planted_commondir_still_isolated(self):
+        base = self.project("iso-forge-sub-")
+        lib, sup = base / "lib", base / "super"
+        for d in (lib, sup):
+            d.mkdir()
+            for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                      ("config", "user.name", "t")):
+                subprocess.run(("git",) + a, cwd=str(d), check=True,
+                               capture_output=True)
+            (d / "f.txt").write_text("x")
+            subprocess.run(("git", "add", "-A"), cwd=str(d), check=True,
+                           capture_output=True)
+            subprocess.run(("git", "commit", "-qm", "i"), cwd=str(d),
+                           check=True, capture_output=True)
+        subprocess.run(
+            ("git", "-c", "protocol.file.allow=always", "submodule", "add",
+             "-q", str(lib), "vendor/lib"),
+            cwd=str(sup), check=True, capture_output=True)
+        sub = sup / "vendor" / "lib"
+        admin = sup / ".git" / "modules" / "vendor" / "lib"
+        (admin / "commondir").write_text("../../..")
+        (admin / "gitdir").write_text(str(sub / ".git"))
+
+        text, err = self.server(sub).call(
+            "cortex_remember", {"type": "fact", "text": "da-lib"})
+        self.assertFalse(err, text)
+        self.assertTrue((sub / ".cortex").exists())
+        self.assertFalse((sup / ".cortex").exists(),
+                         "submódulo com commondir plantado virou worktree")
+
+
+class StrandedDetectionDoesNotSlanderRealMemories(IsolationCase):
+    """Rodada 3 (codex #1): com CORTEX_DIR apontando para fora, a varredura
+    subia do cwd até a raiz do FS e denunciava a memória LEGÍTIMA de outro
+    projeto como órfã — recomendando copiá-la por cima. Aviso materialmente
+    falso, e seguir a instrução misturaria duas memórias."""
+
+    def test_pinned_elsewhere_never_reports_the_cwd_project_as_orphan(self):
+        base = self.project("iso-slander-")
+        a, b = base / "projeto-a", base / "projeto-b"
+        (b / "packages" / "web").mkdir(parents=True)
+        a.mkdir()
+        (b / ".cortex").mkdir()
+        (b / ".cortex" / "cortex.db").write_bytes(b"SQLite format 3\x00")
+
+        text, err = self.server(b / "packages" / "web",
+                                CORTEX_DIR=str(a)).call("cortex_briefing", {})
+        self.assertNotIn("órf", text.lower(),
+                         "memória legítima de outro projeto acusada de órfã")
+
+
+class DevelopmentCloneKeepsItsOwnMemory(IsolationCase):
+    """Rodada 3 (codex #2): o guard de instalação media pelo caminho do
+    servidor, então o clone de DESENVOLVIMENTO do próprio córtex — durável,
+    com `.git` — era tratado como cache efêmero e não podia gravar. O cache
+    de plugin, esse sim, não tem `.git`."""
+
+    def test_a_git_clone_of_cortex_can_use_its_own_memory(self):
+        base = self.project("iso-devclone-")
+        clone = base / "cortex"
+        clone.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(clone), check=True,
+                           capture_output=True)
+        for nome in ("cortex_server.py", "cortex_store.py",
+                     "cortex_project.py"):
+            shutil.copy(str(SERVER.parent / nome), str(clone / nome))
+        subprocess.run(("git", "add", "-A"), cwd=str(clone), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(clone),
+                       check=True, capture_output=True)
+
+        srv = Server(clone, {}, server=clone / "cortex_server.py")
+        self._servers.append(srv)
+        srv.initialize()
+        text, err = srv.call("cortex_remember",
+                             {"type": "fact", "text": "trabalhando-no-cortex"})
+        self.assertFalse(err, "clone de desenvolvimento não pode ser tratado "
+                              "como cache efêmero: %s" % text)
+
+
+class GitConfigParsingRespectsSections(IsolationCase):
+    """Rodada 3 (codex #3): a regex varria o config inteiro, então
+    `worktree =` em QUALQUER seção vencia — uma ferramenta de terceiros
+    escrevendo a própria chave mandava a memória para outro projeto. E
+    `WorkTree` (chaves do git são case-insensitive) não era reconhecido."""
+
+    def test_worktree_outside_core_section_is_ignored(self):
+        import cortex_project as cp
+        base = self.project("iso-cfg-")
+        common, vitima = base / "admin", base / "vitima"
+        common.mkdir()
+        vitima.mkdir()
+        (common / "config").write_text(
+            "[core]\n\tbare = false\n"
+            "[minha-ferramenta]\n\tworktree = %s\n" % vitima)
+        self.assertIsNone(cp._root_from_config(common),
+                          "chave fora de [core] foi obedecida")
+
+    def test_core_worktree_is_case_insensitive(self):
+        import cortex_project as cp
+        base = self.project("iso-cfg2-")
+        common, arvore = base / "admin", base / "arvore"
+        common.mkdir()
+        arvore.mkdir()
+        (common / "config").write_text(
+            "[core]\n\tWorkTree = %s\n" % arvore)
+        self.assertEqual(cp._root_from_config(common), arvore.resolve())
+
+
+class PluginCacheCopyRefusesToHostMemory(IsolationCase):
+    """O cache do plugin é uma CÓPIA dos módulos, sem `.git` — e é recriado a
+    cada update. Memória nascida ali some sem aviso. Um clone de
+    desenvolvimento do córtex, esse, tem `.git` e é durável: por isso a
+    distinção é o marcador de projeto, não o caminho do servidor.
+    """
+
+    def _fake_cache(self):
+        cache = self.project("iso-cache-") / "2.0.2"
+        cache.mkdir()
+        for nome in ("cortex_server.py", "cortex_store.py",
+                     "cortex_project.py"):
+            shutil.copy(str(SERVER.parent / nome), str(cache / nome))
+        return cache
+
+    def test_refuses_writes_and_creates_nothing(self):
+        cache = self._fake_cache()
+        srv = Server(cache, {}, server=cache / "cortex_server.py")
+        self._servers.append(srv)
+        srv.initialize()
+        for tool, args in (("cortex_remember", {"type": "fact", "text": "x"}),
+                           ("cortex_briefing", {})):
+            text, err = srv.call(tool, args)
+            self.assertTrue(err, "%s deveria recusar no cache" % tool)
+            self.assertIn("CORTEX_DIR", text, "a recusa precisa ensinar a saída")
+        self.assertFalse((cache / ".cortex").exists(),
+                         "nada pode nascer no cache do plugin")
+
+    def test_cortex_dir_still_overrides(self):
+        cache = self._fake_cache()
+        tarefa = self.project("iso-cache-task-")
+        srv = Server(cache, {"CORTEX_DIR": str(tarefa)},
+                     server=cache / "cortex_server.py")
+        self._servers.append(srv)
+        srv.initialize()
+        text, err = srv.call("cortex_remember",
+                             {"type": "fact", "text": "com-destino"})
+        self.assertFalse(err, "o escape explícito não se audita a si mesmo: %s"
+                              % text)
+        self.assertTrue((tarefa / ".cortex" / "cortex.db").is_file())
 
 
 if __name__ == "__main__":
