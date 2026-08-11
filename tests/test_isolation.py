@@ -735,5 +735,35 @@ class ConcurrentWritesAreActuallyConcurrent(IsolationCase):
                          % faltando)
 
 
+class WorktreeRedirectBeatsNestedResidue(IsolationCase):
+    """Rodada 3, achado meu: a variante aninhada do latch. Um `.cortex` num
+    SUBDIRETÓRIO da worktree vencia o desvio, porque a subida testava
+    `.cortex` em cada nível antes de alcançar o `.git` da raiz da worktree.
+    Nada dentro de uma cópia descartável pode ser dono da memória — em
+    nenhuma profundidade."""
+
+    def test_nested_cortex_inside_a_worktree_never_wins(self):
+        repo = self.project("iso-nested-latch-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "resto"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "resto")
+        fundo = wt / "packages" / "web"
+        (fundo / ".cortex").mkdir(parents=True)   # resíduo de versão antiga
+
+        text, err = self.server(fundo).call(
+            "cortex_remember", {"type": "decision", "text": "do-fundo"})
+        self.assertFalse(err, text)
+        text, _ = self.server(repo).call("cortex_briefing", {})
+        self.assertIn("do-fundo", text,
+                      "resíduo aninhado capturou a gravação")
+
+
 if __name__ == "__main__":
     unittest.main()

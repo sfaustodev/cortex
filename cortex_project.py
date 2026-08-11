@@ -139,25 +139,42 @@ def resolve(env=None, cwd=None):
         return OK, pinned, pinned / MEMORY_DIRNAME
 
     home = _home()
-    root = start
-    current = start
-    while True:
-        if home is not None and current == home:
-            break
-        # A marca de worktree é testada ANTES de `.cortex/`: um diretório
-        # deixado por uma versão com o bug não pode virar a causa da
-        # resolução seguinte, senão o defeito sobrevive ao próprio conserto.
+
+    # PRIMEIRA passada: procura a marca de worktree em toda a cadeia, antes
+    # de olhar para qualquer `.cortex/`. Um resíduo deixado por uma versão
+    # com o bug não pode virar a causa da resolução seguinte — em nenhuma
+    # profundidade. Testar nível a nível deixava um `.cortex` num
+    # subdiretório da worktree vencer o desvio, e o defeito sobrevivia ao
+    # próprio conserto uma camada abaixo.
+    for current in _upwards(start, home):
         main_root = _main_worktree_root(current / ".git")
         if main_root is not None:
-            root = main_root
-            break
+            return _classify(main_root, home)
+
+    # SEGUNDA: a raiz plausível mais próxima.
+    root = start
+    for current in _upwards(start, home):
         if (current / MEMORY_DIRNAME).exists() or (current / ".git").exists():
             root = current
             break
+    return _classify(root, home)
+
+
+def _upwards(start, home):
+    """Do diretório até a fronteira: `$HOME` (exclusivo) ou a raiz do FS."""
+    current = start
+    while True:
+        if home is not None and current == home:
+            return
+        yield current
         if current.parent == current:
-            break
+            return
         current = current.parent
 
+
+def _classify(root, home):
+    """`$HOME` ou `/` como raiz não é projeto: servir ali seria uma memória
+    global compartilhada por todas as tarefas."""
     if str(root) == os.sep or (home is not None and root == home):
         return NO_PROJECT, root, None
     return OK, root, root / MEMORY_DIRNAME
