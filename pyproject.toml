@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cortex-mcp-server"
-version = "2.0.1"
+version = "2.0.2"
 description = "Durable per-task working memory for coding agents, over MCP."
 readme = "README.md"
 requires-python = ">=3.9"

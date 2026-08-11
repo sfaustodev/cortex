@@ -20,17 +20,36 @@ SERVER = Path(__file__).resolve().parent.parent / "cortex_server.py"
 LATEST = "2025-06-18"
 
 
+def _tempdir_outside_any_repo():
+    """Um TMPDIR dentro de um repositório git faz os projetos de teste
+    herdarem AQUELE repo como raiz — e nove testes falham por um motivo que
+    nada tem a ver com o que verificam. Acontece de verdade: é o que a
+    ferramenta de review faz ao apontar TMPDIR para dentro do checkout.
+    """
+    current = Path(tempfile.gettempdir()).resolve()
+    for d in (current,) + tuple(current.parents):
+        if (d / ".git").exists():
+            neutro = Path(os.sep + "tmp")
+            if os.access(str(neutro), os.W_OK):
+                tempfile.tempdir = tempfile.mkdtemp(
+                    prefix="cortex-tests-", dir=str(neutro))
+            return
+
+
+_tempdir_outside_any_repo()
+
+
 class Server:
     """Cliente do protocolo, com cwd e env controlados — é o cwd que define
     a tarefa, então ele é o sujeito do teste."""
 
-    def __init__(self, cwd, env_extra=None):
+    def __init__(self, cwd, env_extra=None, server=None):
         env = os.environ.copy()
         env.pop("CORTEX_DIR", None)
         env.pop("CORTEX_ADOPT", None)
         env.update(env_extra or {})
         self.proc = subprocess.Popen(
-            [sys.executable, str(SERVER)],
+            [sys.executable, str(server or SERVER)],
             cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env, text=True,
         )
@@ -255,15 +274,22 @@ class CopiedMemoryIsReadOnly(IsolationCase):
             "cortex_remember", {"type": "fact", "text": "pos-adocao"})
         self.assertFalse(err, "depois de adotada, grava sem env nenhum")
 
-    def test_cortex_dir_pointing_at_another_project_refuses(self):
-        a = self._project_with_memory("iso-env-a-")
-        b = self.project("iso-env-b-")
-        text, err = self.server(b, CORTEX_DIR=str(a)).call(
-            "cortex_remember", {"type": "fact", "text": "invasao"})
-        self.assertTrue(err, "CORTEX_DIR residual não pode gravar em A")
-        self.assertNotIn("invasao",
-                         (a / ".cortex" / "cortex.db").read_bytes().decode(
-                             "utf-8", "ignore"))
+    def test_cortex_dir_is_self_owned_and_stable_across_cwds(self):
+        """CORTEX_DIR aponta a tarefa; a identidade É esse diretório, não o
+        cwd de quem abriu. Carimbar o cwd faria a memória pertencer ao
+        primeiro que chegou — e o segundo lançamento, de outro diretório,
+        cairia em somente-leitura permanente. É justamente a configuração
+        que o README recomenda para hosts de cwd imprevisível."""
+        tarefa = self.project("iso-pin-")
+        for origem in ("iso-cwd-a-", "iso-cwd-b-"):
+            cwd = self.project(origem)
+            text, err = self.server(cwd, CORTEX_DIR=str(tarefa)).call(
+                "cortex_remember", {"type": "fact", "text": "de-%s" % origem})
+            self.assertFalse(err, "lançar de outro cwd travou a memória: %s"
+                                  % text)
+        owner = json.loads((tarefa / ".cortex" / "OWNER").read_text())
+        self.assertEqual(owner["root"], str(tarefa),
+                         "o dono tem que ser o diretório apontado, não o cwd")
 
     def test_owner_is_rechecked_on_every_write(self):
         proj = self._project_with_memory("iso-live-")
@@ -353,6 +379,633 @@ class WorktreeMemoryBelongsToTheRepo(IsolationCase):
         text, _ = self.server(wt).call("cortex_briefing", {})
         self.assertIn("gravado-na-main", text,
                       "a worktree tem que enxergar a memória do repo")
+
+
+class ContaminatedWorktreeStillResolvesToTheRepo(IsolationCase):
+    """Trava do latch: o walk-up testava `.cortex/` ANTES de `.git`, então um
+    diretório criado pelo bug virava a causa da resolução seguinte — o bug
+    sobrevivia ao próprio conserto. A marca de worktree tem que vencer."""
+
+    def test_existing_cortex_inside_a_worktree_is_ignored(self):
+        repo = self.project("iso-latch-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "a.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "contaminada"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "contaminada")
+        (wt / ".cortex").mkdir()   # resíduo deixado pela versão com o bug
+
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "fact", "text": "depois-do-conserto"})
+        self.assertFalse(err, text)
+        text, _ = self.server(repo).call("cortex_briefing", {})
+        self.assertIn("depois-do-conserto", text,
+                      "a gravação foi para o .cortex órfão da worktree")
+
+
+class PluginManifestDoesNotDisableTheResolver(unittest.TestCase):
+    """Trava mecânica do incidente: o manifesto injetava
+    CORTEX_DIR=${CLAUDE_PROJECT_DIR}, que numa worktree É a worktree — e o
+    early-return de CORTEX_DIR fazia toda a resolução (inclusive o desvio de
+    worktree) virar código morto. Config que sempre preenche o campo de
+    override anula qualquer lógica que rode depois dele."""
+
+    def test_manifest_never_pins_cortex_dir(self):
+        manifest = json.loads(
+            (SERVER.parent / ".claude-plugin" / "plugin.json")
+            .read_text(encoding="utf-8"))
+        for name, server in manifest.get("mcpServers", {}).items():
+            env = server.get("env", {})
+            self.assertNotIn(
+                "CORTEX_DIR", env,
+                "o manifesto do servidor %r não pode fixar CORTEX_DIR: isso "
+                "curto-circuita a resolução de raiz e reintroduz o bug da "
+                "worktree" % name)
+
+
+class SubmoduleIsNotAWorktree(IsolationCase):
+    """Submódulo TAMBÉM tem `.git` como arquivo — `gitdir: ../../.git/modules/
+    <path>`. Confundi-lo com worktree manda a memória da biblioteca para o
+    superprojeto: some do lugar certo e mistura com outro projeto."""
+
+    def _super_with_submodule(self):
+        base = self.project("iso-sub-")
+        lib, sup = base / "lib", base / "super"
+        for d in (lib, sup):
+            d.mkdir()
+            run = lambda *a, _d=d: subprocess.run(  # noqa: E731
+                a, cwd=str(_d), check=True, capture_output=True)
+            run("git", "init", "-q")
+            run("git", "config", "user.email", "t@t")
+            run("git", "config", "user.name", "t")
+            (d / "f.txt").write_text("x")
+            run("git", "add", "-A")
+            run("git", "commit", "-qm", "init")
+        subprocess.run(
+            ("git", "-c", "protocol.file.allow=always", "submodule", "add",
+             "-q", str(lib), "vendor/lib"),
+            cwd=str(sup), check=True, capture_output=True)
+        return sup, sup / "vendor" / "lib"
+
+    def test_submodule_keeps_its_own_memory(self):
+        sup, sub = self._super_with_submodule()
+        self.assertTrue((sub / ".git").is_file(), "pré-condição: .git-arquivo")
+
+        text, err = self.server(sub).call(
+            "cortex_remember", {"type": "decision", "text": "decisao-da-lib"})
+        self.assertFalse(err, text)
+        self.assertTrue((sub / ".cortex").exists(),
+                        "a memória do submódulo tem que ficar nele")
+
+        text, _ = self.server(sup).call("cortex_briefing", {})
+        self.assertNotIn("decisao-da-lib", text,
+                         "memória do submódulo vazou para o superprojeto")
+
+
+class OrphanWorktreeDoesNotResurrectItsRepo(IsolationCase):
+    """Worktree cujo repositório principal foi apagado: resolver para o
+    caminho morto faria o servidor RECRIAR o diretório que o humano
+    deletou, e esconder a memória num fantasma."""
+
+    def test_falls_back_to_the_worktree_when_the_repo_is_gone(self):
+        base = self.project("iso-orphan-")
+        repo, wt = base / "repo", base / "solta"
+        repo.mkdir()
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        run("git", "worktree", "add", "-q", str(wt), "-b", "solta")
+        shutil.rmtree(str(repo))
+
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "fact", "text": "orfa"})
+        self.assertFalse(err, text)
+        self.assertFalse(repo.exists(),
+                         "o repositório apagado não pode ser recriado")
+        self.assertTrue((wt / ".cortex").exists(),
+                        "sem repo vivo, a memória fica onde há trabalho")
+
+
+class StrandedMemoryIsAnnounced(IsolationCase):
+    """Achado do trio (codex #3 / muse A4): o desvio de worktree faz o
+    servidor IGNORAR um `<worktree>/.cortex` deixado pela versão com o bug.
+    Ignorar em silêncio é a falha original de novo — o humano vê briefing
+    vazio e não sabe que o histórico existe a dois diretórios dali."""
+
+    def _repo_with_stranded_memory(self):
+        repo = self.project("iso-stranded-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "antiga"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "antiga")
+        # memória deixada pela v2.0.1: nasceu DENTRO da worktree
+        (wt / ".cortex").mkdir()
+        (wt / ".cortex" / "cortex.db").write_bytes(b"SQLite format 3\x00")
+        return repo, wt
+
+    def test_briefing_points_at_the_memory_left_behind(self):
+        repo, wt = self._repo_with_stranded_memory()
+        text, err = self.server(wt).call("cortex_briefing", {})
+        self.assertFalse(err, text)
+        self.assertIn(str(wt / ".cortex"), text,
+                      "o briefing tem que dizer ONDE ficou a memória órfã")
+        self.assertIn("cortex.db", text)
+
+    def test_no_warning_when_there_is_nothing_left_behind(self):
+        repo = self.project("iso-clean-")
+        text, _ = self.server(repo).call("cortex_briefing", {})
+        self.assertNotIn("órf", text.lower())
+
+
+
+class ConcurrentWritesFromRepoAndWorktree(IsolationCase):
+    """Achado do trio (codex #5 / muse A5): depois deste PR, main e worktree
+    compartilham o MESMO banco — o caminho concorrente virou o default, e o
+    teste de compartilhamento era sequencial."""
+
+    def test_both_processes_write_without_losing_entries(self):
+        repo = self.project("iso-conc-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "par"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "par")
+
+        srv_main, srv_wt = self.server(repo), self.server(wt)
+        for i in range(12):   # intercalado: as duas sessões vivas ao mesmo tempo
+            for srv, tag in ((srv_main, "main"), (srv_wt, "wt")):
+                text, err = srv.call(
+                    "cortex_remember",
+                    {"type": "fact", "text": "%s-entrada-%d" % (tag, i)})
+                self.assertFalse(err, "escrita concorrente recusada: %s" % text)
+
+        text, _ = srv_main.call("cortex_recall", {"limit": 50})
+        for tag in ("main", "wt"):
+            self.assertIn("%s-entrada-11" % tag, text,
+                          "entrada de %s se perdeu no banco compartilhado" % tag)
+
+
+class WorktreeIsAuthenticatedByGitMetadata(IsolationCase):
+    """Rodada 2 do trio (codex itens 1 e 5, provados de novo por mim).
+
+    Reconhecer worktree pelo NOME de um componente do caminho é insustentável:
+    o nome é escolhido por quem monta o repositório. Um submódulo em
+    `worktrees/lib` batia o padrão e a memória ia parar DENTRO de
+    `.git/modules`. E um path de repositório reutilizado por outro `git init`
+    fazia a worktree antiga contaminar o projeto novo.
+
+    A autenticação passa a ser o metadado do próprio git: o admin dir de uma
+    linked worktree tem `commondir` e um `gitdir` que aponta de volta para o
+    `.git` que estamos lendo. Submódulo não tem `commondir`.
+    """
+
+    def _git(self, cwd, *args):
+        subprocess.run(("git",) + args, cwd=str(cwd), check=True,
+                       capture_output=True)
+
+    def _repo(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        self._git(path, "init", "-q")
+        self._git(path, "config", "user.email", "t@t")
+        self._git(path, "config", "user.name", "t")
+        (path / "f.txt").write_text("x")
+        self._git(path, "add", "-A")
+        self._git(path, "commit", "-qm", "init")
+        return path
+
+    def test_submodule_named_worktrees_is_not_mistaken(self):
+        base = self.project("iso-auth-sub-")
+        lib = self._repo(base / "lib")
+        sup = self._repo(base / "super")
+        subprocess.run(
+            ("git", "-c", "protocol.file.allow=always", "submodule", "add",
+             "-q", str(lib), "worktrees/lib"),
+            cwd=str(sup), check=True, capture_output=True)
+        sub = sup / "worktrees" / "lib"
+
+        text, err = self.server(sub).call(
+            "cortex_remember", {"type": "fact", "text": "da-lib"})
+        self.assertFalse(err, text)
+        self.assertTrue((sub / ".cortex").exists(),
+                        "submódulo tem que ficar com a memória dele")
+        self.assertFalse((sup / ".git" / "modules" / ".cortex").exists(),
+                         "memória nasceu dentro de .git/modules")
+
+    def test_recreated_repo_path_does_not_capture_the_worktree(self):
+        base = self.project("iso-auth-recreated-")
+        orig, side = base / "orig", base / "side"
+        self._repo(orig)
+        self._git(orig, "worktree", "add", "-q", str(side), "-b", "s")
+        shutil.rmtree(str(orig))
+        novo = self._repo(orig)   # MESMO path, repositório diferente
+
+        text, err = self.server(side).call(
+            "cortex_remember", {"type": "fact", "text": "da-worktree-orfa"})
+        self.assertFalse(err, text)
+        self.assertFalse((novo / ".cortex").exists(),
+                         "worktree órfã contaminou o repositório novo")
+        self.assertTrue((side / ".cortex").exists())
+
+
+
+class StrandedMemoryFoundFromSubdirectory(IsolationCase):
+    """Rodada 2 (codex item 2A): lançar de `wt/packages/web` não via a
+    memória órfã em `wt/.cortex` — e lançar de subdiretório é o caso normal."""
+
+    def test_warning_survives_launch_from_a_subdirectory(self):
+        repo = self.project("iso-stranded-sub-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "antiga"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "antiga")
+        (wt / ".cortex").mkdir()
+        (wt / ".cortex" / "cortex.db").write_bytes(b"SQLite format 3\x00")
+        sub = wt / "packages" / "web"
+        sub.mkdir(parents=True)
+
+        text, _ = self.server(sub).call("cortex_briefing", {})
+        self.assertIn(str(wt / ".cortex"), text,
+                      "memória órfã invisível ao lançar de subdiretório")
+
+
+class ConcurrentWritesAreActuallyConcurrent(IsolationCase):
+    """Rodada 2 (codex item 6): o teste anterior era sequencial — cada
+    chamada bloqueava até responder, então zero pares simultâneos. E
+    conferia 2 de 24 entradas."""
+
+    def test_simultaneous_writes_from_both_roots_all_land(self):
+        repo = self.project("iso-realconc-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "par"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "par")
+
+        srv_main, srv_wt = self.server(repo), self.server(wt)
+        rodadas, erros = 10, []
+        barreira = threading.Barrier(2)
+
+        def escreve(srv, tag):
+            for i in range(rodadas):
+                barreira.wait(timeout=30)      # dispara os dois no mesmo instante
+                try:
+                    text, err = srv.call(
+                        "cortex_remember",
+                        {"type": "fact", "text": "%s-%d" % (tag, i)})
+                    if err:
+                        erros.append("%s-%d: %s" % (tag, i, text))
+                except Exception as exc:       # noqa: BLE001
+                    erros.append("%s-%d: %r" % (tag, i, exc))
+
+        threads = [threading.Thread(target=escreve, args=(s, t))
+                   for s, t in ((srv_main, "main"), (srv_wt, "wt"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+
+        self.assertEqual(erros, [], "escritas simultâneas recusadas")
+        text, _ = srv_main.call("cortex_recall", {"limit": 50})
+        faltando = [n for tag in ("main", "wt") for n in
+                    ["%s-%d" % (tag, i) for i in range(rodadas)]
+                    if n not in text]
+        self.assertEqual(faltando, [],
+                         "entradas perdidas no banco compartilhado: %s"
+                         % faltando)
+
+
+class WorktreeRedirectBeatsNestedResidue(IsolationCase):
+    """Rodada 3, achado meu: a variante aninhada do latch. Um `.cortex` num
+    SUBDIRETÓRIO da worktree vencia o desvio, porque a subida testava
+    `.cortex` em cada nível antes de alcançar o `.git` da raiz da worktree.
+    Nada dentro de uma cópia descartável pode ser dono da memória — em
+    nenhuma profundidade."""
+
+    def test_nested_cortex_inside_a_worktree_never_wins(self):
+        repo = self.project("iso-nested-latch-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "resto"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "resto")
+        fundo = wt / "packages" / "web"
+        (fundo / ".cortex").mkdir(parents=True)   # resíduo de versão antiga
+
+        text, err = self.server(fundo).call(
+            "cortex_remember", {"type": "decision", "text": "do-fundo"})
+        self.assertFalse(err, text)
+        text, _ = self.server(repo).call("cortex_briefing", {})
+        self.assertIn("do-fundo", text,
+                      "resíduo aninhado capturou a gravação")
+
+
+class ForgedWorktreeMetadataIsRejected(IsolationCase):
+    """Rodada 3 do trio (muse F1-C1/F1-C2). A autenticação exigia `commondir`
+    e backlink, mas não que o admin dir estivesse DENTRO de
+    `<common>/worktrees/`. Quem controla os dois arquivos escolhe a vítima:
+    aponta `commondir` para o `.git` dela e a memória vai para lá."""
+
+    def test_crafted_admin_dir_cannot_claim_another_repo(self):
+        base = self.project("iso-forge-")
+        vitima = base / "vitima"
+        vitima.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(vitima), check=True,
+                           capture_output=True)
+        (vitima / "f.txt").write_text("x")
+        subprocess.run(("git", "add", "-A"), cwd=str(vitima), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(vitima),
+                       check=True, capture_output=True)
+
+        falsa = base / "falsa"
+        falsa.mkdir()
+        admin = base / "admin-forjado"
+        admin.mkdir()
+        (admin / "commondir").write_text(str(vitima / ".git"))
+        (admin / "gitdir").write_text(str(falsa / ".git"))
+        (falsa / ".git").write_text("gitdir: %s\n" % admin)
+
+        text, err = self.server(falsa).call(
+            "cortex_remember", {"type": "fact", "text": "sequestro"})
+        self.assertFalse(err, text)
+        self.assertFalse((vitima / ".cortex").exists(),
+                         "metadado forjado capturou a memória da vítima")
+
+    def test_submodule_with_planted_commondir_still_isolated(self):
+        base = self.project("iso-forge-sub-")
+        lib, sup = base / "lib", base / "super"
+        for d in (lib, sup):
+            d.mkdir()
+            for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                      ("config", "user.name", "t")):
+                subprocess.run(("git",) + a, cwd=str(d), check=True,
+                               capture_output=True)
+            (d / "f.txt").write_text("x")
+            subprocess.run(("git", "add", "-A"), cwd=str(d), check=True,
+                           capture_output=True)
+            subprocess.run(("git", "commit", "-qm", "i"), cwd=str(d),
+                           check=True, capture_output=True)
+        subprocess.run(
+            ("git", "-c", "protocol.file.allow=always", "submodule", "add",
+             "-q", str(lib), "vendor/lib"),
+            cwd=str(sup), check=True, capture_output=True)
+        sub = sup / "vendor" / "lib"
+        admin = sup / ".git" / "modules" / "vendor" / "lib"
+        (admin / "commondir").write_text("../../..")
+        (admin / "gitdir").write_text(str(sub / ".git"))
+
+        text, err = self.server(sub).call(
+            "cortex_remember", {"type": "fact", "text": "da-lib"})
+        self.assertFalse(err, text)
+        self.assertTrue((sub / ".cortex").exists())
+        self.assertFalse((sup / ".cortex").exists(),
+                         "submódulo com commondir plantado virou worktree")
+
+
+class StrandedDetectionDoesNotSlanderRealMemories(IsolationCase):
+    """Rodada 3 (codex #1): com CORTEX_DIR apontando para fora, a varredura
+    subia do cwd até a raiz do FS e denunciava a memória LEGÍTIMA de outro
+    projeto como órfã — recomendando copiá-la por cima. Aviso materialmente
+    falso, e seguir a instrução misturaria duas memórias."""
+
+    def test_pinned_elsewhere_never_reports_the_cwd_project_as_orphan(self):
+        base = self.project("iso-slander-")
+        a, b = base / "projeto-a", base / "projeto-b"
+        (b / "packages" / "web").mkdir(parents=True)
+        a.mkdir()
+        (b / ".cortex").mkdir()
+        (b / ".cortex" / "cortex.db").write_bytes(b"SQLite format 3\x00")
+
+        text, err = self.server(b / "packages" / "web",
+                                CORTEX_DIR=str(a)).call("cortex_briefing", {})
+        self.assertNotIn("órf", text.lower(),
+                         "memória legítima de outro projeto acusada de órfã")
+
+
+class DevelopmentCloneKeepsItsOwnMemory(IsolationCase):
+    """Rodada 3 (codex #2): o guard de instalação media pelo caminho do
+    servidor, então o clone de DESENVOLVIMENTO do próprio córtex — durável,
+    com `.git` — era tratado como cache efêmero e não podia gravar. O cache
+    de plugin, esse sim, não tem `.git`."""
+
+    def test_a_git_clone_of_cortex_can_use_its_own_memory(self):
+        base = self.project("iso-devclone-")
+        clone = base / "cortex"
+        clone.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(clone), check=True,
+                           capture_output=True)
+        for nome in ("cortex_server.py", "cortex_store.py",
+                     "cortex_project.py"):
+            shutil.copy(str(SERVER.parent / nome), str(clone / nome))
+        subprocess.run(("git", "add", "-A"), cwd=str(clone), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(clone),
+                       check=True, capture_output=True)
+
+        srv = Server(clone, {}, server=clone / "cortex_server.py")
+        self._servers.append(srv)
+        srv.initialize()
+        text, err = srv.call("cortex_remember",
+                             {"type": "fact", "text": "trabalhando-no-cortex"})
+        self.assertFalse(err, "clone de desenvolvimento não pode ser tratado "
+                              "como cache efêmero: %s" % text)
+
+
+class GitConfigParsingRespectsSections(IsolationCase):
+    """Rodada 3 (codex #3): a regex varria o config inteiro, então
+    `worktree =` em QUALQUER seção vencia — uma ferramenta de terceiros
+    escrevendo a própria chave mandava a memória para outro projeto. E
+    `WorkTree` (chaves do git são case-insensitive) não era reconhecido."""
+
+    def test_worktree_outside_core_section_is_ignored(self):
+        import cortex_project as cp
+        base = self.project("iso-cfg-")
+        common, vitima = base / "admin", base / "vitima"
+        common.mkdir()
+        vitima.mkdir()
+        (common / "config").write_text(
+            "[core]\n\tbare = false\n"
+            "[minha-ferramenta]\n\tworktree = %s\n" % vitima)
+        root = cp._root_from_config(common)
+        self.assertNotEqual(root, vitima.resolve(),
+                            "chave fora de [core] foi obedecida")
+        self.assertEqual(root, common.resolve(),
+                         "sem core.worktree, a âncora é o repositório")
+
+    def test_core_worktree_is_case_insensitive(self):
+        import cortex_project as cp
+        base = self.project("iso-cfg2-")
+        common, arvore = base / "admin", base / "arvore"
+        common.mkdir()
+        arvore.mkdir()
+        (common / "config").write_text(
+            "[core]\n\tWorkTree = %s\n" % arvore)
+        self.assertEqual(cp._root_from_config(common), arvore.resolve())
+
+
+class PluginCacheCopyRefusesToHostMemory(IsolationCase):
+    """O cache do plugin é uma CÓPIA dos módulos, sem `.git` — e é recriado a
+    cada update. Memória nascida ali some sem aviso. Um clone de
+    desenvolvimento do córtex, esse, tem `.git` e é durável: por isso a
+    distinção é o marcador de projeto, não o caminho do servidor.
+    """
+
+    def _fake_cache(self):
+        cache = self.project("iso-cache-") / "2.0.2"
+        cache.mkdir()
+        for nome in ("cortex_server.py", "cortex_store.py",
+                     "cortex_project.py"):
+            shutil.copy(str(SERVER.parent / nome), str(cache / nome))
+        return cache
+
+    def test_refuses_writes_and_creates_nothing(self):
+        cache = self._fake_cache()
+        srv = Server(cache, {}, server=cache / "cortex_server.py")
+        self._servers.append(srv)
+        srv.initialize()
+        for tool, args in (("cortex_remember", {"type": "fact", "text": "x"}),
+                           ("cortex_briefing", {})):
+            text, err = srv.call(tool, args)
+            self.assertTrue(err, "%s deveria recusar no cache" % tool)
+            self.assertIn("CORTEX_DIR", text, "a recusa precisa ensinar a saída")
+        self.assertFalse((cache / ".cortex").exists(),
+                         "nada pode nascer no cache do plugin")
+
+    def test_cortex_dir_still_overrides(self):
+        cache = self._fake_cache()
+        tarefa = self.project("iso-cache-task-")
+        srv = Server(cache, {"CORTEX_DIR": str(tarefa)},
+                     server=cache / "cortex_server.py")
+        self._servers.append(srv)
+        srv.initialize()
+        text, err = srv.call("cortex_remember",
+                             {"type": "fact", "text": "com-destino"})
+        self.assertFalse(err, "o escape explícito não se audita a si mesmo: %s"
+                              % text)
+        self.assertTrue((tarefa / ".cortex" / "cortex.db").is_file())
+
+
+class RepositoryIsTheAnchorNotTheMainWorktree(IsolationCase):
+    """Correção de rumo do humano: a pergunta era "onde está a árvore
+    principal?", e em dois layouts ela não tem resposta no disco — nem o
+    próprio git sabe (`git worktree list` nomeia o dir comum). Ancorar no
+    REPOSITÓRIO sempre tem resposta, e é a convenção que o git já adota.
+
+    Repo bare com uma worktree por branch é fluxo mainstream: hoje toda
+    worktree desse setup é amnésica.
+    """
+
+    def _bare_with_worktree(self, base, nome):
+        bare = base / ("%s.git" % nome)
+        subprocess.run(("git", "init", "-q", "--bare", str(bare)),
+                       check=True, capture_output=True)
+        semente = base / ("%s-seed" % nome)
+        semente.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(semente), check=True,
+                           capture_output=True)
+        (semente / "f.txt").write_text("x")
+        subprocess.run(("git", "add", "-A"), cwd=str(semente), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(semente),
+                       check=True, capture_output=True)
+        subprocess.run(("git", "push", "-q", str(bare), "HEAD:refs/heads/main"),
+                       cwd=str(semente), check=True, capture_output=True)
+        wt = base / ("%s-wt" % nome)
+        subprocess.run(("git", "worktree", "add", "-q", str(wt), "main"),
+                       cwd=str(bare), check=True, capture_output=True)
+        return bare, wt
+
+    def test_bare_repo_worktree_writes_to_the_repository(self):
+        base = self.project("iso-bare-")
+        bare, wt = self._bare_with_worktree(base, "C")
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "decision", "text": "do-fluxo-bare"})
+        self.assertFalse(err, text)
+        self.assertTrue((bare / ".cortex").exists(),
+                        "worktree de repo bare ficou amnésica")
+        self.assertFalse((wt / ".cortex").exists())
+
+    def test_separate_git_dir_worktree_writes_to_the_repository(self):
+        base = self.project("iso-sgd-")
+        meta, arvore = base / "B.git", base / "B-tree"
+        subprocess.run(("git", "init", "-q",
+                        "--separate-git-dir=%s" % meta, str(arvore)),
+                       check=True, capture_output=True)
+        for a in (("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(arvore), check=True,
+                           capture_output=True)
+        (arvore / "f.txt").write_text("x")
+        subprocess.run(("git", "add", "-A"), cwd=str(arvore), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(arvore),
+                       check=True, capture_output=True)
+        wt = base / "B-wt"
+        subprocess.run(("git", "worktree", "add", "-q", str(wt), "-b", "wb"),
+                       cwd=str(arvore), check=True, capture_output=True)
+
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "decision", "text": "do-sgd"})
+        self.assertFalse(err, text)
+        self.assertTrue((meta / ".cortex").exists(),
+                        "worktree de separate-git-dir ficou amnésica")
+        self.assertFalse((wt / ".cortex").exists())
+
+    def test_the_working_tree_of_separate_git_dir_keeps_its_own_root(self):
+        """A árvore principal de um separate-git-dir NÃO é worktree
+        vinculada: ela é a raiz, e a memória fica com ela."""
+        base = self.project("iso-sgd2-")
+        meta, arvore = base / "B2.git", base / "B2-tree"
+        subprocess.run(("git", "init", "-q",
+                        "--separate-git-dir=%s" % meta, str(arvore)),
+                       check=True, capture_output=True)
+        text, err = self.server(arvore).call(
+            "cortex_remember", {"type": "fact", "text": "da-arvore"})
+        self.assertFalse(err, text)
+        self.assertTrue((arvore / ".cortex").exists())
 
 
 if __name__ == "__main__":

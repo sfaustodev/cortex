@@ -63,12 +63,22 @@ class PluginManifest(unittest.TestCase):
                         "o comando aponta para arquivo inexistente: %s" % target)
 
     def test_memory_never_lands_inside_the_plugin_directory(self):
-        """${CLAUDE_PLUGIN_ROOT} é efêmero: some no update. O banco vive no
-        projeto, nunca dentro do plugin."""
+        """${CLAUDE_PLUGIN_ROOT} é efêmero: some a cada update. O banco vive
+        no projeto, nunca dentro do plugin.
+
+        A versão anterior deste teste exigia CORTEX_DIR=${CLAUDE_PROJECT_DIR}
+        — codificava o MECANISMO em vez da invariante, e assim travou um bug:
+        numa git worktree essa variável É a worktree, e o early-return de
+        CORTEX_DIR desligava toda a resolução de raiz. A invariante real é
+        negativa: o manifesto não decide onde a memória mora.
+        """
         env = self.manifest["mcpServers"]["cortex"].get("env", {})
-        base = env.get("CORTEX_DIR", "")
-        self.assertNotIn(PLUGIN_ROOT_VAR, base)
-        self.assertEqual(base, "${CLAUDE_PROJECT_DIR}")
+        for name, value in env.items():
+            self.assertNotIn(
+                PLUGIN_ROOT_VAR, str(value),
+                "%s aponta para dentro do plugin, que é efêmero" % name)
+        self.assertNotIn("CORTEX_DIR", env,
+                         "quem resolve a raiz é o servidor, não o manifesto")
 
 
 class MarketplaceManifest(unittest.TestCase):

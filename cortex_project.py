@@ -8,6 +8,7 @@ conhece projetos.
 """
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -32,11 +33,17 @@ def _canon(path):
 def _main_worktree_root(git_path):
     """Numa worktree vinculada, `.git` é um ARQUIVO com `gitdir: <main>/.git/
     worktrees/<nome>`. Devolve a raiz do repositório PRINCIPAL, ou None se
-    isto for um `.git` comum.
+    isto não for uma worktree.
 
-    Existe porque worktree é descartável — o Claude Code cria e remove as
-    dele o tempo todo — e uma memória que mora lá dentro morre junto com a
+    Existe porque worktree é descartável — ferramenta de agente cria e remove
+    as dela o tempo todo — e uma memória que mora lá dentro morre junto com a
     tarefa que ela deveria preservar.
+
+    Submódulo tem `.git`-arquivo IGUAL, mas aponta para `modules/`: é um
+    repositório com identidade própria e fica com a memória dele. Distinguir
+    os dois pelo NOME de um componente do caminho não funciona (um submódulo
+    em `worktrees/lib` bate qualquer heurística de nome) — a autenticação é
+    pelo metadado do git, abaixo.
     """
     try:
         if not git_path.is_file():
@@ -48,12 +55,74 @@ def _main_worktree_root(git_path):
         return None
     gitdir = Path(content.split(":", 1)[1].strip())
     if not gitdir.is_absolute():
-        gitdir = (git_path.parent / gitdir).resolve()
-    # .../<main>/.git/worktrees/<nome>  →  <main>
-    for parent in gitdir.parents:
-        if parent.name == ".git":
-            return _canon(parent.parent)
-    return None
+        gitdir = (git_path.parent / gitdir)
+
+    # Autenticação pelo metadado do git, não pelo NOME de um componente do
+    # caminho: nome é escolhido por quem monta o repositório, e um submódulo
+    # em `worktrees/lib` já bateu esse padrão. Só linked worktree tem
+    # `commondir`; e o `gitdir` de lá aponta de volta para o arquivo que
+    # estamos lendo, o que prova que este admin dir é DESTA worktree — um
+    # path de repositório reutilizado por outro `git init` não bate.
+    commondir_file, backlink = gitdir / "commondir", gitdir / "gitdir"
+    if not (commondir_file.is_file() and backlink.is_file()):
+        return None
+    try:
+        if _canon(backlink.read_text(encoding="utf-8").strip()) != _canon(git_path):
+            return None
+        common = _canon(gitdir / commondir_file.read_text(encoding="utf-8").strip())
+    except Exception:  # noqa: BLE001
+        return None
+    if not common.is_dir():
+        return None
+    # O admin dir precisa morar em `<common>/worktrees/<nome>`. Sem esta
+    # âncora, quem controla `commondir` e o backlink escolhe a vítima: aponta
+    # o common para o `.git` dela e a memória vai parar lá. É também o que
+    # separa worktree de submódulo, cujo admin fica em `modules/`.
+    if _canon(gitdir).parent != common / "worktrees":
+        return None
+    if common.name == ".git":
+        return _canon(common.parent)
+    return _root_from_config(common)
+
+
+def _root_from_config(common):
+    """Common dir fora do layout `<projeto>/.git` — repositório bare ou criado
+    com `--separate-git-dir`.
+
+    A pergunta certa aqui não é "onde está a árvore principal?" — nesses
+    layouts ela pode não ter resposta em lugar nenhum do disco (o config não
+    registra `core.worktree` para separate-git-dir, e bare nem árvore tem; o
+    próprio `git worktree list` nomeia o dir comum como principal). A
+    pergunta é "qual é o repositório?", e essa sempre responde: o common dir.
+    A memória ancora nele — previsível vale mais que visível, e worktree de
+    repo bare (uma por branch) é fluxo mainstream que ficava amnésico.
+    """
+    try:
+        config = (common / "config").read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+    # Só a seção [core]: uma ferramenta de terceiros que grave a própria
+    # chave `worktree` em outra seção mandaria a memória para o projeto
+    # dela. Nomes de chave no git são case-insensitive.
+    core = {}
+    secao = None
+    for linha in config.splitlines():
+        linha = linha.strip()
+        if linha.startswith("[") and linha.endswith("]"):
+            secao = linha[1:-1].strip().lower()
+            continue
+        if secao != "core" or "=" not in linha or linha.startswith(("#", ";")):
+            continue
+        chave, _, valor = linha.partition("=")
+        core[chave.strip().lower()] = valor.strip().strip('"')
+    if core.get("bare", "").lower() == "true":
+        return common          # bare não tem árvore de trabalho; o dir é durável
+    if "worktree" in core:
+        root = _canon(common / core["worktree"])
+        if root.is_dir():
+            return root
+    # Árvore principal não registrada: o repositório é a âncora.
+    return common
 
 
 def _home():
@@ -83,29 +152,54 @@ def resolve(env=None, cwd=None):
 
     configured = env.get("CORTEX_DIR")
     if configured:
-        # O humano escolheu explicitamente; a guarda não se aplica (é o
-        # próprio remédio que o erro da guarda ensina). O dono continua valendo.
-        return OK, start, _canon(configured) / MEMORY_DIRNAME
+        # O humano escolheu explicitamente; a guarda de $HOME não se aplica —
+        # é o próprio remédio que o erro dela ensina.
+        #
+        # A identidade É o diretório apontado, NUNCA o cwd. Carimbar o cwd
+        # faria a memória pertencer a quem a abriu primeiro: com CORTEX_DIR
+        # fixo e cwd variável — precisamente o caso que o README recomenda
+        # para hosts que lançam de lugar imprevisível — o segundo lançamento
+        # viraria mismatch e a memória ficaria somente-leitura para sempre.
+        pinned = _canon(configured)
+        return OK, pinned, pinned / MEMORY_DIRNAME
 
     home = _home()
+
+    # PRIMEIRA passada: procura a marca de worktree em toda a cadeia, antes
+    # de olhar para qualquer `.cortex/`. Um resíduo deixado por uma versão
+    # com o bug não pode virar a causa da resolução seguinte — em nenhuma
+    # profundidade. Testar nível a nível deixava um `.cortex` num
+    # subdiretório da worktree vencer o desvio, e o defeito sobrevivia ao
+    # próprio conserto uma camada abaixo.
+    for current in _upwards(start, home):
+        main_root = _main_worktree_root(current / ".git")
+        if main_root is not None:
+            return _classify(main_root, home)
+
+    # SEGUNDA: a raiz plausível mais próxima.
     root = start
+    for current in _upwards(start, home):
+        if (current / MEMORY_DIRNAME).exists() or (current / ".git").exists():
+            root = current
+            break
+    return _classify(root, home)
+
+
+def _upwards(start, home):
+    """Do diretório até a fronteira: `$HOME` (exclusivo) ou a raiz do FS."""
     current = start
     while True:
         if home is not None and current == home:
-            break
-        if (current / MEMORY_DIRNAME).exists():
-            root = current
-            break
-        git_path = current / ".git"
-        if git_path.exists():
-            # Worktree vinculada: a memória pertence ao repositório, não à
-            # cópia de trabalho descartável.
-            root = _main_worktree_root(git_path) or current
-            break
+            return
+        yield current
         if current.parent == current:
-            break
+            return
         current = current.parent
 
+
+def _classify(root, home):
+    """`$HOME` ou `/` como raiz não é projeto: servir ali seria uma memória
+    global compartilhada por todas as tarefas."""
     if str(root) == os.sep or (home is not None and root == home):
         return NO_PROJECT, root, None
     return OK, root, root / MEMORY_DIRNAME
@@ -118,6 +212,50 @@ def ensure_born(memory_dir, project_root):
     """
     if _owner_root(memory_dir) is None:
         stamp(memory_dir, project_root)
+
+
+def stranded_memory(cwd, project_root):
+    """Banco deixado num diretório que já não é a raiz — tipicamente
+    `<worktree>/.cortex` de antes do desvio para o repositório.
+
+    Ignorar em silêncio seria repetir a falha original: o humano abriria um
+    briefing vazio sem saber que o histórico está a dois diretórios dali.
+
+    Varre do cwd até (sem incluir) a raiz resolvida, porque lançar de um
+    subdiretório da worktree é o caso normal, não a exceção.
+    """
+    start, root = _canon(cwd), _canon(project_root)
+    # Só faz sentido varrer quando a raiz está ACIMA do cwd — o caso do
+    # desvio de worktree. Com CORTEX_DIR apontando para fora, subir até a
+    # raiz do FS acusaria a memória legítima de outro projeto de órfã, e a
+    # receita de recuperação misturaria as duas.
+    if root not in start.parents:
+        return None
+    current = start
+    while True:
+        if current == root:
+            return None
+        db = current / MEMORY_DIRNAME / "cortex.db"
+        if db.is_file():
+            return db
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def is_install_dir(project_root):
+    """A raiz resolvida é o diretório onde o próprio servidor está instalado?
+
+    Sem `CORTEX_DIR`, a raiz vem do cwd do lançamento. Um host que lance de
+    dentro do diretório de instalação faria a memória nascer ali — e o cache
+    de plugin é recriado a cada update, então ela sumiria sem aviso.
+    """
+    root = _canon(project_root)
+    if root != _canon(Path(__file__).resolve().parent):
+        return False
+    # Um clone de desenvolvimento do próprio córtex tem `.git` e é durável —
+    # é projeto, não cache. O cache do plugin é uma cópia sem `.git`.
+    return not (root / ".git").exists()
 
 
 def stamp(memory_dir, project_root):

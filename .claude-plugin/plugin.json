@@ -1,7 +1,7 @@
 {
   "name": "cortex",
   "description": "Durable per-task working memory over MCP: briefing, remember, recall. Pure Python stdlib, zero dependencies, local only.",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "author": {
     "name": "sfaustodev",
     "url": "https://github.com/sfaustodev"
@@ -9,14 +9,19 @@
   "homepage": "https://github.com/sfaustodev/cortex",
   "repository": "https://github.com/sfaustodev/cortex",
   "license": "MIT",
-  "keywords": ["memory", "mcp", "context", "durable-memory", "python"],
+  "keywords": [
+    "memory",
+    "mcp",
+    "context",
+    "durable-memory",
+    "python"
+  ],
   "mcpServers": {
     "cortex": {
       "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/cortex_server.py"],
-      "env": {
-        "CORTEX_DIR": "${CLAUDE_PROJECT_DIR}"
-      }
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/cortex_server.py"
+      ]
     }
   }
 }
