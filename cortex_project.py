@@ -93,14 +93,15 @@ def resolve(env=None, cwd=None):
     while True:
         if home is not None and current == home:
             break
-        if (current / MEMORY_DIRNAME).exists():
-            root = current
+        # A marca de worktree é testada ANTES de `.cortex/`: um diretório
+        # deixado por uma versão com o bug não pode virar a causa da
+        # resolução seguinte, senão o defeito sobrevive ao próprio conserto.
+        main_root = _main_worktree_root(current / ".git")
+        if main_root is not None:
+            root = main_root
             break
-        git_path = current / ".git"
-        if git_path.exists():
-            # Worktree vinculada: a memória pertence ao repositório, não à
-            # cópia de trabalho descartável.
-            root = _main_worktree_root(git_path) or current
+        if (current / MEMORY_DIRNAME).exists() or (current / ".git").exists():
+            root = current
             break
         if current.parent == current:
             break

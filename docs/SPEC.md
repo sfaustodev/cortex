@@ -381,6 +381,19 @@ lendo o `gitdir:` do arquivo. Custo aceito: duas worktrees em paralelo
 compartilham a memória do repo. As entradas já carregam sessão, então a
 mistura é legível; perder tudo não é.
 
+A ordem das checagens é política, não detalhe: a marca de worktree é
+testada **antes** de `.cortex/`. Um diretório deixado por uma versão com
+defeito não pode virar a causa da resolução seguinte — senão o bug
+sobrevive ao próprio conserto, e limpar o código não liberta as
+worktrees já marcadas.
+
+Corolário de embalagem: **o manifesto do plugin não define `CORTEX_DIR`**.
+Fixá-lo em `${CLAUDE_PROJECT_DIR}` parecia prudente e desligava tudo isto
+— numa worktree essa variável É a worktree, e o early-return do escape
+explícito transformava toda a resolução em código morto. Config que
+sempre preenche o campo de override anula qualquer lógica que rode depois
+dele. Há um teste de contrato travando isso.
+
 **Trade-off assumido:** a guarda é breaking. Quem hoje roda com cwd em
 `$HOME` e uma memória global "funcionando" passa a receber erro. É
 deliberado: essa configuração já era descrita como errada, e servir ali
