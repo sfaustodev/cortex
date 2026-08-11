@@ -355,5 +355,52 @@ class WorktreeMemoryBelongsToTheRepo(IsolationCase):
                       "a worktree tem que enxergar a memória do repo")
 
 
+class ContaminatedWorktreeStillResolvesToTheRepo(IsolationCase):
+    """Trava do latch: o walk-up testava `.cortex/` ANTES de `.git`, então um
+    diretório criado pelo bug virava a causa da resolução seguinte — o bug
+    sobrevivia ao próprio conserto. A marca de worktree tem que vencer."""
+
+    def test_existing_cortex_inside_a_worktree_is_ignored(self):
+        repo = self.project("iso-latch-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "a.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "contaminada"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "contaminada")
+        (wt / ".cortex").mkdir()   # resíduo deixado pela versão com o bug
+
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "fact", "text": "depois-do-conserto"})
+        self.assertFalse(err, text)
+        text, _ = self.server(repo).call("cortex_briefing", {})
+        self.assertIn("depois-do-conserto", text,
+                      "a gravação foi para o .cortex órfão da worktree")
+
+
+class PluginManifestDoesNotDisableTheResolver(unittest.TestCase):
+    """Trava mecânica do incidente: o manifesto injetava
+    CORTEX_DIR=${CLAUDE_PROJECT_DIR}, que numa worktree É a worktree — e o
+    early-return de CORTEX_DIR fazia toda a resolução (inclusive o desvio de
+    worktree) virar código morto. Config que sempre preenche o campo de
+    override anula qualquer lógica que rode depois dele."""
+
+    def test_manifest_never_pins_cortex_dir(self):
+        manifest = json.loads(
+            (SERVER.parent / ".claude-plugin" / "plugin.json")
+            .read_text(encoding="utf-8"))
+        for name, server in manifest.get("mcpServers", {}).items():
+            env = server.get("env", {})
+            self.assertNotIn(
+                "CORTEX_DIR", env,
+                "o manifesto do servidor %r não pode fixar CORTEX_DIR: isso "
+                "curto-circuita a resolução de raiz e reintroduz o bug da "
+                "worktree" % name)
+
+
 if __name__ == "__main__":
     unittest.main()
