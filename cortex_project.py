@@ -8,6 +8,7 @@ conhece projetos.
 """
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -39,9 +40,10 @@ def _main_worktree_root(git_path):
     tarefa que ela deveria preservar.
 
     Submódulo tem `.git`-arquivo IGUAL, mas aponta para `modules/`: é um
-    repositório com identidade própria e fica com a memória dele. Por isso o
-    reconhecimento é pelo componente `worktrees`, não por achar `.git` no
-    caminho.
+    repositório com identidade própria e fica com a memória dele. Distinguir
+    os dois pelo NOME de um componente do caminho não funciona (um submódulo
+    em `worktrees/lib` bate qualquer heurística de nome) — a autenticação é
+    pelo metadado do git, abaixo.
     """
     try:
         if not git_path.is_file():
@@ -55,12 +57,46 @@ def _main_worktree_root(git_path):
     if not gitdir.is_absolute():
         gitdir = (git_path.parent / gitdir)
 
-    if gitdir.parent.name != "worktrees":
-        return None  # `modules/…` (submódulo) ou layout desconhecido
-    container = gitdir.parent.parent          # <main>/.git  ou  <repo bare>
-    root = _canon(container.parent if container.name == ".git" else container)
-    # Repositório principal apagado: não ressuscitar o diretório que o humano
-    # removeu — melhor manter a memória onde ainda há trabalho.
+    # Autenticação pelo metadado do git, não pelo NOME de um componente do
+    # caminho: nome é escolhido por quem monta o repositório, e um submódulo
+    # em `worktrees/lib` já bateu esse padrão. Só linked worktree tem
+    # `commondir`; e o `gitdir` de lá aponta de volta para o arquivo que
+    # estamos lendo, o que prova que este admin dir é DESTA worktree — um
+    # path de repositório reutilizado por outro `git init` não bate.
+    commondir_file, backlink = gitdir / "commondir", gitdir / "gitdir"
+    if not (commondir_file.is_file() and backlink.is_file()):
+        return None
+    try:
+        if _canon(backlink.read_text(encoding="utf-8").strip()) != _canon(git_path):
+            return None
+        common = _canon(gitdir / commondir_file.read_text(encoding="utf-8").strip())
+    except Exception:  # noqa: BLE001
+        return None
+    if not common.is_dir():
+        return None
+    if common.name == ".git":
+        return _canon(common.parent)
+    return _root_from_config(common)
+
+
+def _root_from_config(common):
+    """Common dir fora do layout `<projeto>/.git` — repositório bare ou criado
+    com `--separate-git-dir`. Quem sabe onde fica a árvore de trabalho é o
+    config do próprio git.
+
+    Sem resposta clara, devolve None de propósito: manter a memória na
+    worktree é degradação; apontá-la para o lugar errado é corrupção.
+    """
+    try:
+        config = (common / "config").read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+    if re.search(r"^\s*bare\s*=\s*true\s*$", config, re.M | re.I):
+        return common          # bare não tem árvore de trabalho; o dir é durável
+    found = re.search(r"^\s*worktree\s*=\s*(.+?)\s*$", config, re.M)
+    if not found:
+        return None
+    root = _canon(common / found.group(1))
     return root if root.is_dir() else None
 
 
@@ -135,12 +171,21 @@ def stranded_memory(cwd, project_root):
 
     Ignorar em silêncio seria repetir a falha original: o humano abriria um
     briefing vazio sem saber que o histórico está a dois diretórios dali.
+
+    Varre do cwd até (sem incluir) a raiz resolvida, porque lançar de um
+    subdiretório da worktree é o caso normal, não a exceção.
     """
-    start = _canon(cwd)
-    if start == _canon(project_root):
-        return None
-    db = start / MEMORY_DIRNAME / "cortex.db"
-    return db if db.is_file() else None
+    start, root = _canon(cwd), _canon(project_root)
+    current = start
+    while True:
+        if current == root:
+            return None
+        db = current / MEMORY_DIRNAME / "cortex.db"
+        if db.is_file():
+            return db
+        if current.parent == current:
+            return None
+        current = current.parent
 
 
 def is_install_dir(project_root):

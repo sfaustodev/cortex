@@ -172,8 +172,9 @@ STRANDED_MSG = (
 
 INSTALL_DIR_MSG = (
     "⚠ a raiz resolvida é o diretório de instalação do próprio córtex (%s)."
-    " Uma memória aqui é apagada no próximo update. Lance o servidor a partir"
-    " do projeto ou defina CORTEX_DIR.")
+    " Uma memória aqui seria apagada no próximo update, então gravar está"
+    " recusado e nada foi criado. Lance o servidor a partir do projeto, ou"
+    " defina CORTEX_DIR apontando para ele.")
 
 
 def _error(rid, code, message):
@@ -190,6 +191,7 @@ class CortexServer:
         self._memory_dir = None
         self._no_project = None
         self._env_warnings = []
+        self._install_dir = False
         try:
             mode, root, memory_dir = cortex_project.resolve()
         except Exception as exc:  # noqa: BLE001  (ex.: cwd deletado)
@@ -207,11 +209,16 @@ class CortexServer:
             return
         self._base = root
         self._memory_dir = memory_dir
-        # Avisos de ambiente vão no BRIEFING, não só no stderr: aviso que o
-        # agente não lê é o que deixou este servidor servir memória errada
-        # por três versões.
+        # Só vale quando a raiz veio do cwd: com CORTEX_DIR o humano escolheu
+        # o lugar, e o escape explícito não se audita a si mesmo.
+        self._install_dir = (not os.environ.get("CORTEX_DIR")
+                             and cortex_project.is_install_dir(root))
+        # Avisos de ambiente vão em TODA resposta de tool, não só no stderr
+        # nem só no briefing: aviso que o agente não lê é o que deixou este
+        # servidor servir memória errada por três versões, e o protocolo
+        # RECOMENDA briefing primeiro — não impõe.
         self._env_warnings = []
-        if cortex_project.is_install_dir(root):
+        if self._install_dir:
             self._env_warnings.append(INSTALL_DIR_MSG % root)
         stranded = cortex_project.stranded_memory(os.getcwd(), root)
         if stranded is not None:
@@ -219,7 +226,8 @@ class CortexServer:
         for warning in self._env_warnings:
             _log(warning)
         try:
-            cortex_project.ensure_born(memory_dir, root)
+            if not self._install_dir:
+                cortex_project.ensure_born(memory_dir, root)
         except Exception as exc:  # noqa: BLE001  (ex.: caminho ocupado por arquivo)
             # Não é sentença de morte: _ensure_store produz o erro acionável
             # e o protocolo segue de pé para poder respondê-lo.
@@ -233,6 +241,13 @@ class CortexServer:
         if self.store is not None:
             return True
         if self._base is None:
+            return False
+        # No diretório de instalação, abrir o store JÁ criaria o diretório e o
+        # banco — o CortexStore faz mkdir no construtor. Memória que existe é
+        # lida normalmente (quem desenvolve o próprio córtex); memória nova
+        # não nasce aqui, porque o update a apagaria.
+        if self._install_dir and not (self._memory_dir / "cortex.db").is_file():
+            self.store_error = INSTALL_DIR_MSG % self._base
             return False
         try:
             self.store = CortexStore(self._memory_dir / "cortex.db")
@@ -310,6 +325,10 @@ class CortexServer:
         read_only = owner_status == cortex_project.MISMATCH
         try:
             if name == "cortex_remember":
+                if self._install_dir:
+                    return self._tool_text(
+                        rid, "Gravação recusada: " + INSTALL_DIR_MSG % self._base,
+                        is_error=True)
                 if read_only:
                     return self._tool_text(
                         rid, "Gravação recusada: " + MISMATCH_MSG % (owner,
@@ -334,7 +353,7 @@ class CortexServer:
                 text += self._nudge()
             if read_only:
                 text = "⚠ " + MISMATCH_MSG % (owner, owner) + "\n\n" + text
-            if name == "cortex_briefing" and self._env_warnings:
+            if self._env_warnings:
                 text = "\n".join(self._env_warnings) + "\n\n" + text
             return self._tool_text(rid, text, is_error=False)
         except StoreError as exc:

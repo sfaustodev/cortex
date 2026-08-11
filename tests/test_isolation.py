@@ -513,12 +513,14 @@ class MemoryNeverLandsWhereTheServerLives(IsolationCase):
     cache do plugin, que é efêmero), a memória nasceria ali e sumiria no
     próximo update — sem ninguém perceber."""
 
-    def test_briefing_warns_when_root_is_the_install_dir(self):
+    def test_briefing_refuses_and_explains_in_the_install_dir(self):
         text, err = self.server(SERVER.parent).call("cortex_briefing", {})
-        self.assertFalse(err, text)
+        self.assertTrue(err, "não há memória aqui e não vamos criar uma")
         self.assertIn("instala", text.lower(),
-                      "briefing precisa avisar que a raiz é o diretório do "
+                      "a recusa precisa dizer que a raiz é o diretório do "
                       "próprio servidor")
+        self.assertIn("CORTEX_DIR", text, "e ensinar a saída")
+        self.assertFalse((SERVER.parent / ".cortex").exists())
 
 
 class ConcurrentWritesFromRepoAndWorktree(IsolationCase):
@@ -551,6 +553,160 @@ class ConcurrentWritesFromRepoAndWorktree(IsolationCase):
         for tag in ("main", "wt"):
             self.assertIn("%s-entrada-11" % tag, text,
                           "entrada de %s se perdeu no banco compartilhado" % tag)
+
+
+class WorktreeIsAuthenticatedByGitMetadata(IsolationCase):
+    """Rodada 2 do trio (codex itens 1 e 5, provados de novo por mim).
+
+    Reconhecer worktree pelo NOME de um componente do caminho é insustentável:
+    o nome é escolhido por quem monta o repositório. Um submódulo em
+    `worktrees/lib` batia o padrão e a memória ia parar DENTRO de
+    `.git/modules`. E um path de repositório reutilizado por outro `git init`
+    fazia a worktree antiga contaminar o projeto novo.
+
+    A autenticação passa a ser o metadado do próprio git: o admin dir de uma
+    linked worktree tem `commondir` e um `gitdir` que aponta de volta para o
+    `.git` que estamos lendo. Submódulo não tem `commondir`.
+    """
+
+    def _git(self, cwd, *args):
+        subprocess.run(("git",) + args, cwd=str(cwd), check=True,
+                       capture_output=True)
+
+    def _repo(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        self._git(path, "init", "-q")
+        self._git(path, "config", "user.email", "t@t")
+        self._git(path, "config", "user.name", "t")
+        (path / "f.txt").write_text("x")
+        self._git(path, "add", "-A")
+        self._git(path, "commit", "-qm", "init")
+        return path
+
+    def test_submodule_named_worktrees_is_not_mistaken(self):
+        base = self.project("iso-auth-sub-")
+        lib = self._repo(base / "lib")
+        sup = self._repo(base / "super")
+        subprocess.run(
+            ("git", "-c", "protocol.file.allow=always", "submodule", "add",
+             "-q", str(lib), "worktrees/lib"),
+            cwd=str(sup), check=True, capture_output=True)
+        sub = sup / "worktrees" / "lib"
+
+        text, err = self.server(sub).call(
+            "cortex_remember", {"type": "fact", "text": "da-lib"})
+        self.assertFalse(err, text)
+        self.assertTrue((sub / ".cortex").exists(),
+                        "submódulo tem que ficar com a memória dele")
+        self.assertFalse((sup / ".git" / "modules" / ".cortex").exists(),
+                         "memória nasceu dentro de .git/modules")
+
+    def test_recreated_repo_path_does_not_capture_the_worktree(self):
+        base = self.project("iso-auth-recreated-")
+        orig, side = base / "orig", base / "side"
+        self._repo(orig)
+        self._git(orig, "worktree", "add", "-q", str(side), "-b", "s")
+        shutil.rmtree(str(orig))
+        novo = self._repo(orig)   # MESMO path, repositório diferente
+
+        text, err = self.server(side).call(
+            "cortex_remember", {"type": "fact", "text": "da-worktree-orfa"})
+        self.assertFalse(err, text)
+        self.assertFalse((novo / ".cortex").exists(),
+                         "worktree órfã contaminou o repositório novo")
+        self.assertTrue((side / ".cortex").exists())
+
+
+class EnvironmentWarningsReachEveryTool(IsolationCase):
+    """Rodada 2 (codex item 3): o aviso só ia no briefing, mas o protocolo
+    recomenda o briefing — não o impõe. Um agente que chame remember de
+    primeira não via nada."""
+
+    def test_install_dir_refuses_writes_and_creates_nothing(self):
+        srv = self.server(SERVER.parent)
+        text, err = srv.call("cortex_remember", {"type": "fact", "text": "x"})
+        self.assertTrue(err, "gravar no diretório de instalação tem que "
+                             "ser recusado: some no próximo update")
+        self.assertIn("CORTEX_DIR", text)
+        self.assertFalse((SERVER.parent / ".cortex").exists(),
+                         "nada pode nascer no diretório de instalação")
+
+
+class StrandedMemoryFoundFromSubdirectory(IsolationCase):
+    """Rodada 2 (codex item 2A): lançar de `wt/packages/web` não via a
+    memória órfã em `wt/.cortex` — e lançar de subdiretório é o caso normal."""
+
+    def test_warning_survives_launch_from_a_subdirectory(self):
+        repo = self.project("iso-stranded-sub-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "antiga"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "antiga")
+        (wt / ".cortex").mkdir()
+        (wt / ".cortex" / "cortex.db").write_bytes(b"SQLite format 3\x00")
+        sub = wt / "packages" / "web"
+        sub.mkdir(parents=True)
+
+        text, _ = self.server(sub).call("cortex_briefing", {})
+        self.assertIn(str(wt / ".cortex"), text,
+                      "memória órfã invisível ao lançar de subdiretório")
+
+
+class ConcurrentWritesAreActuallyConcurrent(IsolationCase):
+    """Rodada 2 (codex item 6): o teste anterior era sequencial — cada
+    chamada bloqueava até responder, então zero pares simultâneos. E
+    conferia 2 de 24 entradas."""
+
+    def test_simultaneous_writes_from_both_roots_all_land(self):
+        repo = self.project("iso-realconc-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "par"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "par")
+
+        srv_main, srv_wt = self.server(repo), self.server(wt)
+        rodadas, erros = 10, []
+        barreira = threading.Barrier(2)
+
+        def escreve(srv, tag):
+            for i in range(rodadas):
+                barreira.wait(timeout=30)      # dispara os dois no mesmo instante
+                try:
+                    text, err = srv.call(
+                        "cortex_remember",
+                        {"type": "fact", "text": "%s-%d" % (tag, i)})
+                    if err:
+                        erros.append("%s-%d: %s" % (tag, i, text))
+                except Exception as exc:       # noqa: BLE001
+                    erros.append("%s-%d: %r" % (tag, i, exc))
+
+        threads = [threading.Thread(target=escreve, args=(s, t))
+                   for s, t in ((srv_main, "main"), (srv_wt, "wt"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+
+        self.assertEqual(erros, [], "escritas simultâneas recusadas")
+        text, _ = srv_main.call("cortex_recall", {"limit": 50})
+        faltando = [n for tag in ("main", "wt") for n in
+                    ["%s-%d" % (tag, i) for i in range(rodadas)]
+                    if n not in text]
+        self.assertEqual(faltando, [],
+                         "entradas perdidas no banco compartilhado: %s"
+                         % faltando)
 
 
 if __name__ == "__main__":
