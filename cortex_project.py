@@ -32,11 +32,16 @@ def _canon(path):
 def _main_worktree_root(git_path):
     """Numa worktree vinculada, `.git` é um ARQUIVO com `gitdir: <main>/.git/
     worktrees/<nome>`. Devolve a raiz do repositório PRINCIPAL, ou None se
-    isto for um `.git` comum.
+    isto não for uma worktree.
 
-    Existe porque worktree é descartável — o Claude Code cria e remove as
-    dele o tempo todo — e uma memória que mora lá dentro morre junto com a
+    Existe porque worktree é descartável — ferramenta de agente cria e remove
+    as dela o tempo todo — e uma memória que mora lá dentro morre junto com a
     tarefa que ela deveria preservar.
+
+    Submódulo tem `.git`-arquivo IGUAL, mas aponta para `modules/`: é um
+    repositório com identidade própria e fica com a memória dele. Por isso o
+    reconhecimento é pelo componente `worktrees`, não por achar `.git` no
+    caminho.
     """
     try:
         if not git_path.is_file():
@@ -48,12 +53,15 @@ def _main_worktree_root(git_path):
         return None
     gitdir = Path(content.split(":", 1)[1].strip())
     if not gitdir.is_absolute():
-        gitdir = (git_path.parent / gitdir).resolve()
-    # .../<main>/.git/worktrees/<nome>  →  <main>
-    for parent in gitdir.parents:
-        if parent.name == ".git":
-            return _canon(parent.parent)
-    return None
+        gitdir = (git_path.parent / gitdir)
+
+    if gitdir.parent.name != "worktrees":
+        return None  # `modules/…` (submódulo) ou layout desconhecido
+    container = gitdir.parent.parent          # <main>/.git  ou  <repo bare>
+    root = _canon(container.parent if container.name == ".git" else container)
+    # Repositório principal apagado: não ressuscitar o diretório que o humano
+    # removeu — melhor manter a memória onde ainda há trabalho.
+    return root if root.is_dir() else None
 
 
 def _home():

@@ -402,5 +402,73 @@ class PluginManifestDoesNotDisableTheResolver(unittest.TestCase):
                 "worktree" % name)
 
 
+class SubmoduleIsNotAWorktree(IsolationCase):
+    """Submódulo TAMBÉM tem `.git` como arquivo — `gitdir: ../../.git/modules/
+    <path>`. Confundi-lo com worktree manda a memória da biblioteca para o
+    superprojeto: some do lugar certo e mistura com outro projeto."""
+
+    def _super_with_submodule(self):
+        base = self.project("iso-sub-")
+        lib, sup = base / "lib", base / "super"
+        for d in (lib, sup):
+            d.mkdir()
+            run = lambda *a, _d=d: subprocess.run(  # noqa: E731
+                a, cwd=str(_d), check=True, capture_output=True)
+            run("git", "init", "-q")
+            run("git", "config", "user.email", "t@t")
+            run("git", "config", "user.name", "t")
+            (d / "f.txt").write_text("x")
+            run("git", "add", "-A")
+            run("git", "commit", "-qm", "init")
+        subprocess.run(
+            ("git", "-c", "protocol.file.allow=always", "submodule", "add",
+             "-q", str(lib), "vendor/lib"),
+            cwd=str(sup), check=True, capture_output=True)
+        return sup, sup / "vendor" / "lib"
+
+    def test_submodule_keeps_its_own_memory(self):
+        sup, sub = self._super_with_submodule()
+        self.assertTrue((sub / ".git").is_file(), "pré-condição: .git-arquivo")
+
+        text, err = self.server(sub).call(
+            "cortex_remember", {"type": "decision", "text": "decisao-da-lib"})
+        self.assertFalse(err, text)
+        self.assertTrue((sub / ".cortex").exists(),
+                        "a memória do submódulo tem que ficar nele")
+
+        text, _ = self.server(sup).call("cortex_briefing", {})
+        self.assertNotIn("decisao-da-lib", text,
+                         "memória do submódulo vazou para o superprojeto")
+
+
+class OrphanWorktreeDoesNotResurrectItsRepo(IsolationCase):
+    """Worktree cujo repositório principal foi apagado: resolver para o
+    caminho morto faria o servidor RECRIAR o diretório que o humano
+    deletou, e esconder a memória num fantasma."""
+
+    def test_falls_back_to_the_worktree_when_the_repo_is_gone(self):
+        base = self.project("iso-orphan-")
+        repo, wt = base / "repo", base / "solta"
+        repo.mkdir()
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        run("git", "worktree", "add", "-q", str(wt), "-b", "solta")
+        shutil.rmtree(str(repo))
+
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "fact", "text": "orfa"})
+        self.assertFalse(err, text)
+        self.assertFalse(repo.exists(),
+                         "o repositório apagado não pode ser recriado")
+        self.assertTrue((wt / ".cortex").exists(),
+                        "sem repo vivo, a memória fica onde há trabalho")
+
+
 if __name__ == "__main__":
     unittest.main()
