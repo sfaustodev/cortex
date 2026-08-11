@@ -127,9 +127,16 @@ def resolve(env=None, cwd=None):
 
     configured = env.get("CORTEX_DIR")
     if configured:
-        # O humano escolheu explicitamente; a guarda não se aplica (é o
-        # próprio remédio que o erro da guarda ensina). O dono continua valendo.
-        return OK, start, _canon(configured) / MEMORY_DIRNAME
+        # O humano escolheu explicitamente; a guarda de $HOME não se aplica —
+        # é o próprio remédio que o erro dela ensina.
+        #
+        # A identidade É o diretório apontado, NUNCA o cwd. Carimbar o cwd
+        # faria a memória pertencer a quem a abriu primeiro: com CORTEX_DIR
+        # fixo e cwd variável — precisamente o caso que o README recomenda
+        # para hosts que lançam de lugar imprevisível — o segundo lançamento
+        # viraria mismatch e a memória ficaria somente-leitura para sempre.
+        pinned = _canon(configured)
+        return OK, pinned, pinned / MEMORY_DIRNAME
 
     home = _home()
     root = start

@@ -20,6 +20,25 @@ SERVER = Path(__file__).resolve().parent.parent / "cortex_server.py"
 LATEST = "2025-06-18"
 
 
+def _tempdir_outside_any_repo():
+    """Um TMPDIR dentro de um repositório git faz os projetos de teste
+    herdarem AQUELE repo como raiz — e nove testes falham por um motivo que
+    nada tem a ver com o que verificam. Acontece de verdade: é o que a
+    ferramenta de review faz ao apontar TMPDIR para dentro do checkout.
+    """
+    current = Path(tempfile.gettempdir()).resolve()
+    for d in (current,) + tuple(current.parents):
+        if (d / ".git").exists():
+            neutro = Path(os.sep + "tmp")
+            if os.access(str(neutro), os.W_OK):
+                tempfile.tempdir = tempfile.mkdtemp(
+                    prefix="cortex-tests-", dir=str(neutro))
+            return
+
+
+_tempdir_outside_any_repo()
+
+
 class Server:
     """Cliente do protocolo, com cwd e env controlados — é o cwd que define
     a tarefa, então ele é o sujeito do teste."""
@@ -255,15 +274,22 @@ class CopiedMemoryIsReadOnly(IsolationCase):
             "cortex_remember", {"type": "fact", "text": "pos-adocao"})
         self.assertFalse(err, "depois de adotada, grava sem env nenhum")
 
-    def test_cortex_dir_pointing_at_another_project_refuses(self):
-        a = self._project_with_memory("iso-env-a-")
-        b = self.project("iso-env-b-")
-        text, err = self.server(b, CORTEX_DIR=str(a)).call(
-            "cortex_remember", {"type": "fact", "text": "invasao"})
-        self.assertTrue(err, "CORTEX_DIR residual não pode gravar em A")
-        self.assertNotIn("invasao",
-                         (a / ".cortex" / "cortex.db").read_bytes().decode(
-                             "utf-8", "ignore"))
+    def test_cortex_dir_is_self_owned_and_stable_across_cwds(self):
+        """CORTEX_DIR aponta a tarefa; a identidade É esse diretório, não o
+        cwd de quem abriu. Carimbar o cwd faria a memória pertencer ao
+        primeiro que chegou — e o segundo lançamento, de outro diretório,
+        cairia em somente-leitura permanente. É justamente a configuração
+        que o README recomenda para hosts de cwd imprevisível."""
+        tarefa = self.project("iso-pin-")
+        for origem in ("iso-cwd-a-", "iso-cwd-b-"):
+            cwd = self.project(origem)
+            text, err = self.server(cwd, CORTEX_DIR=str(tarefa)).call(
+                "cortex_remember", {"type": "fact", "text": "de-%s" % origem})
+            self.assertFalse(err, "lançar de outro cwd travou a memória: %s"
+                                  % text)
+        owner = json.loads((tarefa / ".cortex" / "OWNER").read_text())
+        self.assertEqual(owner["root"], str(tarefa),
+                         "o dono tem que ser o diretório apontado, não o cwd")
 
     def test_owner_is_rechecked_on_every_write(self):
         proj = self._project_with_memory("iso-live-")
