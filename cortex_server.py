@@ -162,6 +162,19 @@ MISMATCH_MSG = (
     " deste projeto (pasta movida ou renomeada), adote uma vez com"
     " CORTEX_ADOPT=%s.")
 
+STRANDED_MSG = (
+    "⚠ memória órfã em %s — deixada aqui por uma versão anterior, que gravava"
+    " dentro da worktree. Ela NÃO está em uso e some quando a worktree for"
+    " removida. Para recuperá-la, copie o BANCO (não a pasta, que carrega o"
+    " carimbo de dono) sobre a memória atual enquanto ela ainda estiver vazia."
+    " Com as duas populadas, exporte com `sqlite3 <origem> .dump` antes de"
+    " decidir o que juntar.")
+
+INSTALL_DIR_MSG = (
+    "⚠ a raiz resolvida é o diretório de instalação do próprio córtex (%s)."
+    " Uma memória aqui é apagada no próximo update. Lance o servidor a partir"
+    " do projeto ou defina CORTEX_DIR.")
+
 
 def _error(rid, code, message):
     return {"jsonrpc": "2.0", "id": rid,
@@ -176,6 +189,7 @@ class CortexServer:
         self._base = None
         self._memory_dir = None
         self._no_project = None
+        self._env_warnings = []
         try:
             mode, root, memory_dir = cortex_project.resolve()
         except Exception as exc:  # noqa: BLE001  (ex.: cwd deletado)
@@ -193,6 +207,17 @@ class CortexServer:
             return
         self._base = root
         self._memory_dir = memory_dir
+        # Avisos de ambiente vão no BRIEFING, não só no stderr: aviso que o
+        # agente não lê é o que deixou este servidor servir memória errada
+        # por três versões.
+        self._env_warnings = []
+        if cortex_project.is_install_dir(root):
+            self._env_warnings.append(INSTALL_DIR_MSG % root)
+        stranded = cortex_project.stranded_memory(os.getcwd(), root)
+        if stranded is not None:
+            self._env_warnings.append(STRANDED_MSG % stranded)
+        for warning in self._env_warnings:
+            _log(warning)
         try:
             cortex_project.ensure_born(memory_dir, root)
         except Exception as exc:  # noqa: BLE001  (ex.: caminho ocupado por arquivo)
@@ -309,6 +334,8 @@ class CortexServer:
                 text += self._nudge()
             if read_only:
                 text = "⚠ " + MISMATCH_MSG % (owner, owner) + "\n\n" + text
+            if name == "cortex_briefing" and self._env_warnings:
+                text = "\n".join(self._env_warnings) + "\n\n" + text
             return self._tool_text(rid, text, is_error=False)
         except StoreError as exc:
             return self._tool_text(rid, "Erro: %s" % exc, is_error=True)

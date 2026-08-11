@@ -470,5 +470,88 @@ class OrphanWorktreeDoesNotResurrectItsRepo(IsolationCase):
                         "sem repo vivo, a memória fica onde há trabalho")
 
 
+class StrandedMemoryIsAnnounced(IsolationCase):
+    """Achado do trio (codex #3 / muse A4): o desvio de worktree faz o
+    servidor IGNORAR um `<worktree>/.cortex` deixado pela versão com o bug.
+    Ignorar em silêncio é a falha original de novo — o humano vê briefing
+    vazio e não sabe que o histórico existe a dois diretórios dali."""
+
+    def _repo_with_stranded_memory(self):
+        repo = self.project("iso-stranded-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "antiga"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "antiga")
+        # memória deixada pela v2.0.1: nasceu DENTRO da worktree
+        (wt / ".cortex").mkdir()
+        (wt / ".cortex" / "cortex.db").write_bytes(b"SQLite format 3\x00")
+        return repo, wt
+
+    def test_briefing_points_at_the_memory_left_behind(self):
+        repo, wt = self._repo_with_stranded_memory()
+        text, err = self.server(wt).call("cortex_briefing", {})
+        self.assertFalse(err, text)
+        self.assertIn(str(wt / ".cortex"), text,
+                      "o briefing tem que dizer ONDE ficou a memória órfã")
+        self.assertIn("cortex.db", text)
+
+    def test_no_warning_when_there_is_nothing_left_behind(self):
+        repo = self.project("iso-clean-")
+        text, _ = self.server(repo).call("cortex_briefing", {})
+        self.assertNotIn("órf", text.lower())
+
+
+class MemoryNeverLandsWhereTheServerLives(IsolationCase):
+    """Achado do trio (codex #2/#6): sem CORTEX_DIR a raiz vem do cwd. Se um
+    host lançar o servidor de dentro do próprio diretório de instalação (o
+    cache do plugin, que é efêmero), a memória nasceria ali e sumiria no
+    próximo update — sem ninguém perceber."""
+
+    def test_briefing_warns_when_root_is_the_install_dir(self):
+        text, err = self.server(SERVER.parent).call("cortex_briefing", {})
+        self.assertFalse(err, text)
+        self.assertIn("instala", text.lower(),
+                      "briefing precisa avisar que a raiz é o diretório do "
+                      "próprio servidor")
+
+
+class ConcurrentWritesFromRepoAndWorktree(IsolationCase):
+    """Achado do trio (codex #5 / muse A5): depois deste PR, main e worktree
+    compartilham o MESMO banco — o caminho concorrente virou o default, e o
+    teste de compartilhamento era sequencial."""
+
+    def test_both_processes_write_without_losing_entries(self):
+        repo = self.project("iso-conc-")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(repo), check=True, capture_output=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (repo / "f.txt").write_text("x")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        wt = repo / ".claude" / "worktrees" / "par"
+        run("git", "worktree", "add", "-q", str(wt), "-b", "par")
+
+        srv_main, srv_wt = self.server(repo), self.server(wt)
+        for i in range(12):   # intercalado: as duas sessões vivas ao mesmo tempo
+            for srv, tag in ((srv_main, "main"), (srv_wt, "wt")):
+                text, err = srv.call(
+                    "cortex_remember",
+                    {"type": "fact", "text": "%s-entrada-%d" % (tag, i)})
+                self.assertFalse(err, "escrita concorrente recusada: %s" % text)
+
+        text, _ = srv_main.call("cortex_recall", {"limit": 50})
+        for tag in ("main", "wt"):
+            self.assertIn("%s-entrada-11" % tag, text,
+                          "entrada de %s se perdeu no banco compartilhado" % tag)
+
+
 if __name__ == "__main__":
     unittest.main()

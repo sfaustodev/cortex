@@ -129,6 +129,30 @@ def ensure_born(memory_dir, project_root):
         stamp(memory_dir, project_root)
 
 
+def stranded_memory(cwd, project_root):
+    """Banco deixado num diretório que já não é a raiz — tipicamente
+    `<worktree>/.cortex` de antes do desvio para o repositório.
+
+    Ignorar em silêncio seria repetir a falha original: o humano abriria um
+    briefing vazio sem saber que o histórico está a dois diretórios dali.
+    """
+    start = _canon(cwd)
+    if start == _canon(project_root):
+        return None
+    db = start / MEMORY_DIRNAME / "cortex.db"
+    return db if db.is_file() else None
+
+
+def is_install_dir(project_root):
+    """A raiz resolvida é o diretório onde o próprio servidor está instalado?
+
+    Sem `CORTEX_DIR`, a raiz vem do cwd do lançamento. Um host que lance de
+    dentro do diretório de instalação faria a memória nascer ali — e o cache
+    de plugin é recriado a cada update, então ela sumiria sem aviso.
+    """
+    return _canon(project_root) == _canon(Path(__file__).resolve().parent)
+
+
 def stamp(memory_dir, project_root):
     """Carimbo e .gitignore nascem COM o diretório, antes do banco — um
     briefing numa tarefa nova já materializa arquivo, e ele não pode nascer
