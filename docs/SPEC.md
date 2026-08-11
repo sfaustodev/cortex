@@ -387,6 +387,17 @@ defeito não pode virar a causa da resolução seguinte — senão o bug
 sobrevive ao próprio conserto, e limpar o código não liberta as
 worktrees já marcadas.
 
+A âncora é o REPOSITÓRIO, não a árvore principal. Em `--separate-git-dir`
+e em repo bare, "onde está a árvore principal?" pode não ter resposta em
+lugar nenhum do disco — o config não registra `core.worktree`, e o próprio
+`git worktree list` nomeia o dir comum como principal. "Qual é o
+repositório?" sempre responde: o common dir, que o `git worktree remove`
+não toca. A memória de uma worktree vinculada ancora ali (`B.git/.cortex`).
+Custo assumido: nesses dois layouts ela mora dentro do git dir, fora da
+vista — previsível valeu mais que visível, e uma regra é mais sustentável
+que duas. Worktree-por-branch sobre repo bare é fluxo mainstream que, sem
+isso, ficava amnésico.
+
 Corolário de embalagem: **o manifesto do plugin não define `CORTEX_DIR`**.
 Fixá-lo em `${CLAUDE_PROJECT_DIR}` parecia prudente e desligava tudo isto
 — numa worktree essa variável É a worktree, e o early-return do escape

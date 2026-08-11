@@ -87,11 +87,15 @@ def _main_worktree_root(git_path):
 
 def _root_from_config(common):
     """Common dir fora do layout `<projeto>/.git` — repositório bare ou criado
-    com `--separate-git-dir`. Quem sabe onde fica a árvore de trabalho é o
-    config do próprio git.
+    com `--separate-git-dir`.
 
-    Sem resposta clara, devolve None de propósito: manter a memória na
-    worktree é degradação; apontá-la para o lugar errado é corrupção.
+    A pergunta certa aqui não é "onde está a árvore principal?" — nesses
+    layouts ela pode não ter resposta em lugar nenhum do disco (o config não
+    registra `core.worktree` para separate-git-dir, e bare nem árvore tem; o
+    próprio `git worktree list` nomeia o dir comum como principal). A
+    pergunta é "qual é o repositório?", e essa sempre responde: o common dir.
+    A memória ancora nele — previsível vale mais que visível, e worktree de
+    repo bare (uma por branch) é fluxo mainstream que ficava amnésico.
     """
     try:
         config = (common / "config").read_text(encoding="utf-8")
@@ -113,10 +117,12 @@ def _root_from_config(common):
         core[chave.strip().lower()] = valor.strip().strip('"')
     if core.get("bare", "").lower() == "true":
         return common          # bare não tem árvore de trabalho; o dir é durável
-    if "worktree" not in core:
-        return None
-    root = _canon(common / core["worktree"])
-    return root if root.is_dir() else None
+    if "worktree" in core:
+        root = _canon(common / core["worktree"])
+        if root.is_dir():
+            return root
+    # Árvore principal não registrada: o repositório é a âncora.
+    return common
 
 
 def _home():

@@ -867,8 +867,11 @@ class GitConfigParsingRespectsSections(IsolationCase):
         (common / "config").write_text(
             "[core]\n\tbare = false\n"
             "[minha-ferramenta]\n\tworktree = %s\n" % vitima)
-        self.assertIsNone(cp._root_from_config(common),
-                          "chave fora de [core] foi obedecida")
+        root = cp._root_from_config(common)
+        self.assertNotEqual(root, vitima.resolve(),
+                            "chave fora de [core] foi obedecida")
+        self.assertEqual(root, common.resolve(),
+                         "sem core.worktree, a âncora é o repositório")
 
     def test_core_worktree_is_case_insensitive(self):
         import cortex_project as cp
@@ -921,6 +924,88 @@ class PluginCacheCopyRefusesToHostMemory(IsolationCase):
         self.assertFalse(err, "o escape explícito não se audita a si mesmo: %s"
                               % text)
         self.assertTrue((tarefa / ".cortex" / "cortex.db").is_file())
+
+
+class RepositoryIsTheAnchorNotTheMainWorktree(IsolationCase):
+    """Correção de rumo do humano: a pergunta era "onde está a árvore
+    principal?", e em dois layouts ela não tem resposta no disco — nem o
+    próprio git sabe (`git worktree list` nomeia o dir comum). Ancorar no
+    REPOSITÓRIO sempre tem resposta, e é a convenção que o git já adota.
+
+    Repo bare com uma worktree por branch é fluxo mainstream: hoje toda
+    worktree desse setup é amnésica.
+    """
+
+    def _bare_with_worktree(self, base, nome):
+        bare = base / ("%s.git" % nome)
+        subprocess.run(("git", "init", "-q", "--bare", str(bare)),
+                       check=True, capture_output=True)
+        semente = base / ("%s-seed" % nome)
+        semente.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(semente), check=True,
+                           capture_output=True)
+        (semente / "f.txt").write_text("x")
+        subprocess.run(("git", "add", "-A"), cwd=str(semente), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(semente),
+                       check=True, capture_output=True)
+        subprocess.run(("git", "push", "-q", str(bare), "HEAD:refs/heads/main"),
+                       cwd=str(semente), check=True, capture_output=True)
+        wt = base / ("%s-wt" % nome)
+        subprocess.run(("git", "worktree", "add", "-q", str(wt), "main"),
+                       cwd=str(bare), check=True, capture_output=True)
+        return bare, wt
+
+    def test_bare_repo_worktree_writes_to_the_repository(self):
+        base = self.project("iso-bare-")
+        bare, wt = self._bare_with_worktree(base, "C")
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "decision", "text": "do-fluxo-bare"})
+        self.assertFalse(err, text)
+        self.assertTrue((bare / ".cortex").exists(),
+                        "worktree de repo bare ficou amnésica")
+        self.assertFalse((wt / ".cortex").exists())
+
+    def test_separate_git_dir_worktree_writes_to_the_repository(self):
+        base = self.project("iso-sgd-")
+        meta, arvore = base / "B.git", base / "B-tree"
+        subprocess.run(("git", "init", "-q",
+                        "--separate-git-dir=%s" % meta, str(arvore)),
+                       check=True, capture_output=True)
+        for a in (("config", "user.email", "t@t"),
+                  ("config", "user.name", "t")):
+            subprocess.run(("git",) + a, cwd=str(arvore), check=True,
+                           capture_output=True)
+        (arvore / "f.txt").write_text("x")
+        subprocess.run(("git", "add", "-A"), cwd=str(arvore), check=True,
+                       capture_output=True)
+        subprocess.run(("git", "commit", "-qm", "i"), cwd=str(arvore),
+                       check=True, capture_output=True)
+        wt = base / "B-wt"
+        subprocess.run(("git", "worktree", "add", "-q", str(wt), "-b", "wb"),
+                       cwd=str(arvore), check=True, capture_output=True)
+
+        text, err = self.server(wt).call(
+            "cortex_remember", {"type": "decision", "text": "do-sgd"})
+        self.assertFalse(err, text)
+        self.assertTrue((meta / ".cortex").exists(),
+                        "worktree de separate-git-dir ficou amnésica")
+        self.assertFalse((wt / ".cortex").exists())
+
+    def test_the_working_tree_of_separate_git_dir_keeps_its_own_root(self):
+        """A árvore principal de um separate-git-dir NÃO é worktree
+        vinculada: ela é a raiz, e a memória fica com ela."""
+        base = self.project("iso-sgd2-")
+        meta, arvore = base / "B2.git", base / "B2-tree"
+        subprocess.run(("git", "init", "-q",
+                        "--separate-git-dir=%s" % meta, str(arvore)),
+                       check=True, capture_output=True)
+        text, err = self.server(arvore).call(
+            "cortex_remember", {"type": "fact", "text": "da-arvore"})
+        self.assertFalse(err, text)
+        self.assertTrue((arvore / ".cortex").exists())
 
 
 if __name__ == "__main__":
